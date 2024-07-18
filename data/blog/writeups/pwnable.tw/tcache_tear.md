@@ -8,19 +8,19 @@ summary: Utilizing double free to create a fake chunk in the BSS section of the 
 
 ## Description
 
-![alt text](../../../../../public/static/writeups/pwnable.tw/image.png)
+![alt text](/static/writeups/pwnable.tw/image.png)
 
 ## Solution
 
 In this challenge, we're given a stripped x64 binary. Along with that, we're given a libc; so using `pwninit` to link the libc to the binary. Checking the mitigations on the binary:
 
-![alt text](../../../../../public/static/writeups/pwnable.tw/image-1.png)
+![alt text](/static/writeups/pwnable.tw/image-1.png)
 
 > PIE is disabled.
 
 Now, let's firstly run this binary and see what's going on:
 
-![alt text](../../../../../public/static/writeups/pwnable.tw/image-2.png)
+![alt text](/static/writeups/pwnable.tw/image-2.png)
 
 The binary firstly asks for a simple name and we're presented with a menu (which is pretty common in all of the heap challenges.)
 
@@ -206,11 +206,11 @@ free()
 
 However, upon running this, we're greeted with the following message:
 
-![alt text](../../../../../public/static/writeups/pwnable.tw/image-3.png)
+![alt text](/static/writeups/pwnable.tw/image-3.png)
 
 Upon debugging it in gdb and following the `backtrace`, we see:
 
-![alt text](../../../../../public/static/writeups/pwnable.tw/image-4.png)
+![alt text](/static/writeups/pwnable.tw/image-4.png)
 
 In `malloc.c` on line `4281`; using [Elixir](https://elixir.bootlin.com/glibc/glibc-2.27/source/malloc/malloc.c#L4281):
 
@@ -290,15 +290,15 @@ malloc(0x60, fake_chunk)
 
 Now, looking at the `NAME_BUF` address in gdb:
 
-![alt text](../../../../../public/static/writeups/pwnable.tw/image-5.png)
+![alt text](/static/writeups/pwnable.tw/image-5.png)
 
 We can see that the `BK` pointer now points to `0x602070`. Now, let's free this chunk and then analyze the memory again:
 
-![alt text](../../../../../public/static/writeups/pwnable.tw/image-6.png)
+![alt text](/static/writeups/pwnable.tw/image-6.png)
 
 We can see that now, the unsorted bin contains our `NAME_BUF` and also, the `FD` and `BK` pointers now point to the libc's `main_arena`. Now, if we see the info, we'll see that we get a libc leak:
 
-![alt text](../../../../../public/static/writeups/pwnable.tw/image-7.png)
+![alt text](/static/writeups/pwnable.tw/image-7.png)
 
 We can easily parse this leak and get a leak to libc by calculating the offsets.
 
@@ -430,4 +430,4 @@ free()
 io.interactive()
 ```
 
-![alt text](../../../../../public/static/writeups/pwnable.tw/image-8.png)
+![alt text](/static/writeups/pwnable.tw/image-8.png)
