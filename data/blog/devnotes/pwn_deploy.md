@@ -12,6 +12,14 @@ This blog post will cover all the basics on how you can develop pwn challenges [
 
 | Similar concept is applicable to Crypto, Jail or other challenges that require a netcat connection.
 
+## Table of Content
+
+- **[Challenge Development](#challenge-development)**
+- **[Linux](#linux)**
+- **[ARMHF and ARM64](#armhf-and-arm64)**
+- **[Windows](#windows)**
+- **[Linux Kernel](#linux-kernel)**
+
 ## Challenge Development
 
 Let's consider the following source code:
