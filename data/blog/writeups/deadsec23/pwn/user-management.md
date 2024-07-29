@@ -653,8 +653,8 @@ Now, the next thing we'll do is write the ROP chain on the return address as fol
 | --- | --- |
 | 0x0 | POP RDI |
 | 0x8 | /bin/sh |
-| 0xC | RET |
-| 0x10 | system |
+| 0x10 | RET |
+| 0x18 | system |
 
 Now, for these, the rop chains will be as follows:
 
