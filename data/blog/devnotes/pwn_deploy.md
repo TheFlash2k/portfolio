@@ -337,7 +337,7 @@ CTF{F4k3_fl4g_f0r_73s71ng}
 
 ## Linux Kernel
 
-For Linux kernel based challenges' deployment and development, you can refer to [Papdoxie](https://papadoxie.github.io/Blog/Making%20a%20Kernel%20CTF%20%28PUCon%2724%20pwn%20CTF%29/)'s guide. He has explained it in great detail.
+For Linux kernel based challenges' deployment and development, you can refer to [Papadoxie](https://papadoxie.github.io/Blog/Making%20a%20Kernel%20CTF%20%28PUCon%2724%20pwn%20CTF%29/)'s guide. He has explained it in great detail.
 
 ## Sidenote
 
@@ -350,7 +350,7 @@ CHAL_NAME := test
 SRC := $(CHAL_NAME).c
 TAR_FILE := $(CHAL_NAME).tar
 CONTAINER_NAME := ctf-$(CHAL_NAME)
-DEFAULT_FLAG := "NEORIX{F4k3_fl4g_f0r_t3st1ng}"
+DEFAULT_FLAG := "CTF{F4k3_fl4g_f0r_t3st1ng}"
 
 # FLAGS
 CC := gcc
