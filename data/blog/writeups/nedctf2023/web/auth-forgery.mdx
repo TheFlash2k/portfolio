@@ -1,7 +1,7 @@
 ---
 title: NED CTF'23 - Web - Auth Forgery
 date: '2023-07-03'
-tags: ['ctf', 'web', 'nedctf', 'writeup', 'auth-bypass', 'ssrf', 'jwt']
+tags: ['web', 'nedctf', 'auth-bypass', 'ssrf', 'jwt']
 draft: false
 summary: Auth bypassing and using SSRF to get the flag.
 ---
@@ -310,5 +310,5 @@ Running this script, we get the following output:
 ```md
 [*] Fetching the admin jwt token: {'JWT': 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VybmFtZSI6ImFkbWluIn0.Dw4EfY6pBMfHZnG4Q4b9cSudgS*2XzcZ3sldeoQBleQ'}
 [*] Making request to /set_profile_picture
-[*] Flag: NCC{au7h_th3n*$$rf}
+[*] Flag: NCC{au7h_th3n\*$$rf}
 ```

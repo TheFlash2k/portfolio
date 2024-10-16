@@ -1,7 +1,7 @@
 ---
 title: NED CTF'23 - Pwn - Overflow
 date: '2023-07-03'
-tags: ['ctf', 'pwn', 'nedctf', 'writeup', 'buffer-overflow', 'x64']
+tags: ['pwn', 'nedctf', 'buffer-overflow']
 draft: false
 summary: A classic x64 stack overflow.
 ---
@@ -116,8 +116,8 @@ Here, the `win` function is simply opening the `flag.txt` file and printing it's
 Now, to solve this, we can simply overflow the buffer, and let the signal handlers give us the flag. The buffer size specified is `32`, however, to overflow, I calculate using the following technique:
 
 ```md
-BUFFER_SIZE _ 4 - in case of 32-bit binaries
-BUFFER_SIZE _ 8 - in case of 64-bit binaries
+BUFFER*SIZE * 4 - in case of 32-bit binaries
+BUFFER*SIZE * 8 - in case of 64-bit binaries
 ```
 
 However, I don't know how accurate this is, but it works for me. Now, let's try out the first method, i.e. overflowing the buffer and letting the signals give us the flag.

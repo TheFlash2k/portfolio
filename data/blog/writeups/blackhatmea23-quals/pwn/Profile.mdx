@@ -1,21 +1,9 @@
 ---
 title: Blackhat MEA '23 Quals - Pwn - Profile
 date: '2023-10-09'
-tags:
-  [
-    'ctf',
-    'pwn',
-    'blackhat',
-    'blackhatmea',
-    'blackhatmea23',
-    'interger-overflow',
-    'fsb',
-    'format-string',
-    'leak',
-    'aslr-bypass',
-  ]
+tags: ['ctf', 'pwn', 'blackhatmea23', 'interger-overflow', 'printf', 'fsb']
 draft: false
-summary: Exploiting an integer overflow with FSB to leak the libc address and then overwriting the GOT entry of `free` with `system` to get a shell.
+summary: Exploiting an integer overflow to overwrite got entries, get leaks with printf and then overwriting the GOT entry of `free` with `system` to get a shell.
 ---
 
 ## Challenge Description
